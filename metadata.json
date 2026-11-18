@@ -1,0 +1,6 @@
+{
+  "name": "Counter-Strike 1.6: Low-Poly Cinematic Remake",
+  "description": "A playable first-person tactical shooter inspired by classic Counter-Strike 1.6 with low-poly 3D graphics, cinematic lighting, iconic maps, authentic weapons, AI bots, and classic HUD.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
