@@ -1,13 +1,15 @@
 import { Suspense, useEffect, useMemo, useRef, useState } from 'react';
 import { ContactShadows, OrbitControls, Sparkles } from '@react-three/drei';
 import { Canvas, useFrame, useThree } from '@react-three/fiber';
+import { Bloom, EffectComposer, ToneMapping } from '@react-three/postprocessing';
 import { RotateCcw, ZoomIn, ZoomOut } from 'lucide-react';
+import { ToneMappingMode } from 'postprocessing';
 import * as THREE from 'three';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 import type { OrbitControls as OrbitControlsImpl } from 'three-stdlib';
 import { animateCharacterPose, buildCharacterRig } from '../../game/CharacterModels';
 import { CharacterClassId, WeaponId } from '../../game/types';
-import { buildWeaponModel } from '../../game/WeaponModels';
+import { buildWeaponModel, SHARED_WEAPON_MATERIALS } from '../../game/WeaponModels';
 import { disposeObjectSubtree } from '../../utils/threeDisposal';
 import { detectSoftwareWebGL } from '../../utils/webglCapabilities';
 
@@ -54,7 +56,7 @@ function CharacterSubject({
 
   useEffect(() => {
     return () => {
-      disposeObjectSubtree(rig.root);
+      disposeObjectSubtree(rig.root, undefined, SHARED_WEAPON_MATERIALS);
     };
   }, [rig]);
 
@@ -80,7 +82,7 @@ function WeaponSubject({ weaponId }: { weaponId: WeaponId }) {
 
   useEffect(() => {
     return () => {
-      disposeObjectSubtree(model);
+      disposeObjectSubtree(model, undefined, SHARED_WEAPON_MATERIALS);
     };
   }, [model]);
 
@@ -288,6 +290,13 @@ export function CharacterPreviewCanvas({
                 }
               }}
             />
+          )}
+
+          {!isSoftwareGl && (
+            <EffectComposer multisampling={4}>
+              <Bloom mipmapBlur luminanceThreshold={0.92} intensity={0.28} />
+              <ToneMapping mode={ToneMappingMode.ACES_FILMIC} />
+            </EffectComposer>
           )}
         </Suspense>
       </Canvas>

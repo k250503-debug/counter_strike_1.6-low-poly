@@ -96,6 +96,8 @@ export class RoundManager {
     } else if (winner === 'CT') {
       this.ctScore += 1;
       audioManager.playRadioCue('ct_win');
+    } else {
+      audioManager.playRadioCue('round_draw');
     }
 
     const title =

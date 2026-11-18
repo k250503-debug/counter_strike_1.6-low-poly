@@ -374,6 +374,7 @@ export function ControlsModal({ onClose }: { onClose: () => void }) {
     { key: 'crouch', label: 'Crouch' },
     { key: 'walk', label: 'Walk (Silent)' },
     { key: 'reload', label: 'Reload Weapon' },
+    { key: 'inspect', label: 'Inspect Weapon' },
     { key: 'use', label: 'Plant / Defuse C4' },
     { key: 'buy', label: 'Buy Menu' },
     { key: 'drop', label: 'Drop Primary' },
@@ -434,10 +435,10 @@ export function AboutModal({ onClose }: { onClose: () => void }) {
         </div>
 
         <p className="text-sm text-white/80 leading-relaxed">
-          <strong className="text-white">Counter-Strike 1.6 — Low-Poly Cinematic Remake</strong> is a
+          <strong className="text-white">Counter-Strike 1.6 — Stylized 3D Tactical Remake</strong> is a
           browser-native tactical first-person shooter combining classic Counter-Strike round
           economy, recoil control, bombsite strategy, and transparent HUD aesthetics with modern
-          procedural low-poly 3D graphics and Web Audio sound synthesis.
+          procedural stylized 3D graphics, PBR materials, and Web Audio sound synthesis.
         </p>
 
         <div className="grid grid-cols-2 gap-2 text-xs text-white/75 border-t border-white/15 pt-3">

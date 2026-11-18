@@ -26,7 +26,15 @@ export type TextureKind =
   | 'wood_plank'
   | 'container_blue'
   | 'container_red'
-  | 'water';
+  | 'water'
+  | 'roof_tile'
+  | 'window_glass'
+  | 'wood_mahogany'
+  | 'carpet_office'
+  | 'bark_palm'
+  | 'bark_pine'
+  | 'foliage_leaf'
+  | 'foliage_pine';
 
 export type CharacterTextureKind =
   | 'ripstop_camo'
@@ -37,21 +45,79 @@ export type CharacterTextureKind =
   | 'kevlar_molle'
   | 'leather';
 
-interface PbrTexturePair {
+export type WeaponSurfaceKind = 'gunmetal' | 'polymer' | 'walnut' | 'chrome' | 'carbon';
+export type SoftParticleKind = 'smoke' | 'fire' | 'spark' | 'muzzle' | 'shockwave';
+
+export interface PbrTexturePair {
   map: THREE.CanvasTexture;
   bumpMap: THREE.CanvasTexture;
+  normalMap: THREE.CanvasTexture;
   roughnessMap?: THREE.CanvasTexture;
 }
 
 class ProceduralTextureLibrary {
   private cache = new Map<string, PbrTexturePair>();
   private charCache = new Map<string, PbrTexturePair>();
+  private weaponCache = new Map<string, PbrTexturePair>();
   private skyCache = new Map<string, THREE.CanvasTexture>();
   private decalCache = new Map<string, THREE.CanvasTexture>();
+  private particleCache = new Map<string, THREE.CanvasTexture>();
+  private skinCache = new Map<number, THREE.CanvasTexture>();
   private maxAnisotropy = 8;
 
   public setMaxAnisotropy(val: number): void {
     this.maxAnisotropy = Math.max(1, Math.min(16, val));
+  }
+
+  private createNormalCanvasFromHeight(heightCanvas: HTMLCanvasElement, strength = 2.4): HTMLCanvasElement {
+    const w = heightCanvas.width;
+    const h = heightCanvas.height;
+    const srcCtx = heightCanvas.getContext('2d')!;
+    const srcData = srcCtx.getImageData(0, 0, w, h).data;
+
+    const outCanvas = document.createElement('canvas');
+    outCanvas.width = w;
+    outCanvas.height = h;
+    const outCtx = outCanvas.getContext('2d')!;
+    const outImg = outCtx.createImageData(w, h);
+    const dst = outImg.data;
+
+    const sample = (x: number, y: number): number => {
+      const wx = ((x % w) + w) % w;
+      const wy = ((y % h) + h) % h;
+      return srcData[(wy * w + wx) * 4] / 255;
+    };
+
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        const tl = sample(x - 1, y - 1);
+        const t = sample(x, y - 1);
+        const tr = sample(x + 1, y - 1);
+        const l = sample(x - 1, y);
+        const r = sample(x + 1, y);
+        const bl = sample(x - 1, y + 1);
+        const b = sample(x, y + 1);
+        const br = sample(x + 1, y + 1);
+
+        const dX = (tr + 2 * r + br - (tl + 2 * l + bl)) * strength;
+        const dY = (bl + 2 * b + br - (tl + 2 * t + tr)) * strength;
+        let nx = -dX;
+        let ny = -dY;
+        let nz = 1.0;
+        const invLen = 1 / Math.hypot(nx, ny, nz);
+        nx *= invLen;
+        ny *= invLen;
+        nz *= invLen;
+
+        const idx = (y * w + x) * 4;
+        dst[idx] = Math.round((nx * 0.5 + 0.5) * 255);
+        dst[idx + 1] = Math.round((ny * 0.5 + 0.5) * 255);
+        dst[idx + 2] = Math.round((nz * 0.5 + 0.5) * 255);
+        dst[idx + 3] = 255;
+      }
+    }
+    outCtx.putImageData(outImg, 0, 0);
+    return outCanvas;
   }
 
   public getPair(kind: TextureKind, repeatX = 1, repeatY = 1): PbrTexturePair {
@@ -71,6 +137,7 @@ class ProceduralTextureLibrary {
     const bCtx = bumpCanvas.getContext('2d')!;
 
     this.drawPattern(aCtx, bCtx, kind, size);
+    const normalCanvas = this.createNormalCanvasFromHeight(bumpCanvas, 2.2);
 
     const map = new THREE.CanvasTexture(albedoCanvas);
     map.colorSpace = THREE.SRGBColorSpace;
@@ -87,13 +154,282 @@ class ProceduralTextureLibrary {
     bumpMap.anisotropy = this.maxAnisotropy;
     bumpMap.needsUpdate = true;
 
-    const pair = { map, bumpMap };
+    const normalMap = new THREE.CanvasTexture(normalCanvas);
+    normalMap.wrapS = THREE.RepeatWrapping;
+    normalMap.wrapT = THREE.RepeatWrapping;
+    normalMap.repeat.set(repeatX, repeatY);
+    normalMap.anisotropy = this.maxAnisotropy;
+    normalMap.needsUpdate = true;
+
+    const pair = { map, bumpMap, normalMap };
     this.cache.set(key, pair);
     return pair;
   }
 
   public get(kind: TextureKind, repeatX = 1, repeatY = 1): THREE.CanvasTexture {
     return this.getPair(kind, repeatX, repeatY).map;
+  }
+
+  public createSoftParticleTexture(kind: SoftParticleKind): THREE.CanvasTexture {
+    const cached = this.particleCache.get(kind);
+    if (cached) return cached;
+
+    const size = 128;
+    const canvas = document.createElement('canvas');
+    canvas.width = size;
+    canvas.height = size;
+    const ctx = canvas.getContext('2d')!;
+    const cx = size / 2;
+    const cy = size / 2;
+    ctx.clearRect(0, 0, size, size);
+
+    if (kind === 'smoke') {
+      // Multi-lobe billowy stylized cloud sprite
+      const lobes = [
+        [64, 64, 52, 0.45],
+        [48, 56, 36, 0.34],
+        [80, 58, 34, 0.32],
+        [62, 44, 34, 0.32],
+        [64, 78, 36, 0.28],
+      ];
+      for (const [lx, ly, lr, alpha] of lobes) {
+        const g = ctx.createRadialGradient(lx, ly, 4, lx, ly, lr);
+        g.addColorStop(0, `rgba(248, 250, 252, ${alpha})`);
+        g.addColorStop(0.55, `rgba(210, 216, 224, ${alpha * 0.65})`);
+        g.addColorStop(1, 'rgba(180, 186, 194, 0)');
+        ctx.fillStyle = g;
+        ctx.beginPath();
+        ctx.arc(lx, ly, lr, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    } else if (kind === 'fire') {
+      const g = ctx.createRadialGradient(cx, cy, 4, cx, cy, 60);
+      g.addColorStop(0, 'rgba(255, 252, 220, 1.0)');
+      g.addColorStop(0.28, 'rgba(255, 190, 64, 0.92)');
+      g.addColorStop(0.6, 'rgba(235, 84, 24, 0.56)');
+      g.addColorStop(1, 'rgba(80, 18, 8, 0)');
+      ctx.fillStyle = g;
+      ctx.fillRect(0, 0, size, size);
+    } else if (kind === 'spark') {
+      const g = ctx.createRadialGradient(cx, cy, 2, cx, cy, 54);
+      g.addColorStop(0, 'rgba(255, 255, 240, 1)');
+      g.addColorStop(0.32, 'rgba(255, 206, 92, 0.85)');
+      g.addColorStop(1, 'rgba(255, 120, 20, 0)');
+      ctx.fillStyle = g;
+      ctx.fillRect(0, 0, size, size);
+    } else if (kind === 'muzzle') {
+      // Crisp 4-point star flare + bright core
+      const core = ctx.createRadialGradient(cx, cy, 2, cx, cy, 42);
+      core.addColorStop(0, 'rgba(255, 255, 244, 1)');
+      core.addColorStop(0.35, 'rgba(255, 212, 112, 0.85)');
+      core.addColorStop(1, 'rgba(255, 132, 32, 0)');
+      ctx.fillStyle = core;
+      ctx.fillRect(0, 0, size, size);
+
+      ctx.save();
+      ctx.translate(cx, cy);
+      for (let i = 0; i < 4; i++) {
+        ctx.rotate(Math.PI / 4);
+        const sg = ctx.createRadialGradient(0, 0, 2, 0, 0, 58);
+        sg.addColorStop(0, 'rgba(255, 248, 210, 0.92)');
+        sg.addColorStop(0.5, 'rgba(255, 178, 60, 0.42)');
+        sg.addColorStop(1, 'rgba(255, 120, 20, 0)');
+        ctx.fillStyle = sg;
+        ctx.beginPath();
+        ctx.ellipse(0, 0, 58, 9, 0, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      ctx.restore();
+    } else {
+      // Shockwave ring
+      const rg = ctx.createRadialGradient(cx, cy, 28, cx, cy, 60);
+      rg.addColorStop(0, 'rgba(255, 220, 150, 0)');
+      rg.addColorStop(0.65, 'rgba(255, 215, 130, 0.7)');
+      rg.addColorStop(0.85, 'rgba(255, 165, 72, 0.45)');
+      rg.addColorStop(1, 'rgba(255, 120, 30, 0)');
+      ctx.fillStyle = rg;
+      ctx.beginPath();
+      ctx.arc(cx, cy, 60, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    const tex = new THREE.CanvasTexture(canvas);
+    tex.colorSpace = THREE.SRGBColorSpace;
+    tex.needsUpdate = true;
+    this.particleCache.set(kind, tex);
+    return tex;
+  }
+
+  public getWeaponSurfacePair(kind: WeaponSurfaceKind): PbrTexturePair {
+    const cached = this.weaponCache.get(kind);
+    if (cached) return cached;
+
+    const size = 256;
+    const albedo = document.createElement('canvas');
+    albedo.width = size;
+    albedo.height = size;
+    const aCtx = albedo.getContext('2d')!;
+
+    const bump = document.createElement('canvas');
+    bump.width = size;
+    bump.height = size;
+    const bCtx = bump.getContext('2d')!;
+
+    const rough = document.createElement('canvas');
+    rough.width = size;
+    rough.height = size;
+    const rCtx = rough.getContext('2d')!;
+
+    let seed = kind.split('').reduce((a, c) => a + c.charCodeAt(0) * 37, 9001);
+    const rand = () => {
+      seed = (seed * 1664525 + 1013904223) % 4294967296;
+      return seed / 4294967296;
+    };
+
+    if (kind === 'gunmetal' || kind === 'chrome') {
+      aCtx.fillStyle = kind === 'chrome' ? '#e4e8ee' : '#d2d6dc';
+      aCtx.fillRect(0, 0, size, size);
+      bCtx.fillStyle = '#808080';
+      bCtx.fillRect(0, 0, size, size);
+      rCtx.fillStyle = kind === 'chrome' ? '#484848' : '#7a7a7a';
+      rCtx.fillRect(0, 0, size, size);
+      // Brushed anisotropic metal grain + subtle oil-rubbed edge wear
+      for (let y = 0; y < size; y += 2) {
+        const v = Math.floor((rand() - 0.5) * 18);
+        aCtx.fillStyle = `rgba(${210 + v}, ${214 + v}, ${220 + v}, 0.25)`;
+        aCtx.fillRect(0, y, size, 1);
+        bCtx.fillStyle = `rgb(${128 + v}, ${128 + v}, ${128 + v})`;
+        bCtx.fillRect(0, y, size, 1);
+      }
+      for (let i = 0; i < 45; i++) {
+        const rx = rand() * size;
+        const ry = rand() * size;
+        aCtx.fillStyle = 'rgba(255,255,255,0.06)';
+        aCtx.fillRect(rx, ry, 14 + rand() * 34, 2);
+      }
+    } else if (kind === 'polymer') {
+      aCtx.fillStyle = '#dedede';
+      aCtx.fillRect(0, 0, size, size);
+      bCtx.fillStyle = '#808080';
+      bCtx.fillRect(0, 0, size, size);
+      rCtx.fillStyle = '#a8a8a8';
+      rCtx.fillRect(0, 0, size, size);
+      // Micro-stippled matte grip texture
+      for (let y = 0; y < size; y += 4) {
+        for (let x = 0; x < size; x += 4) {
+          const d = rand() > 0.5;
+          bCtx.fillStyle = d ? '#a4a4a4' : '#5c5c5c';
+          bCtx.fillRect(x, y, 2, 2);
+          rCtx.fillStyle = d ? '#989898' : '#c0c0c0';
+          rCtx.fillRect(x, y, 2, 2);
+        }
+      }
+    } else if (kind === 'walnut') {
+      aCtx.fillStyle = '#c89b6e';
+      aCtx.fillRect(0, 0, size, size);
+      bCtx.fillStyle = '#808080';
+      bCtx.fillRect(0, 0, size, size);
+      rCtx.fillStyle = '#8e8e8e';
+      rCtx.fillRect(0, 0, size, size);
+      // Stylized rich curved walnut grain streaks
+      for (let i = 0; i < 46; i++) {
+        const y0 = (i / 46) * size;
+        aCtx.strokeStyle = i % 3 === 0 ? 'rgba(72, 38, 16, 0.34)' : 'rgba(135, 78, 36, 0.24)';
+        aCtx.lineWidth = 1.5 + rand() * 2.5;
+        aCtx.beginPath();
+        aCtx.moveTo(0, y0);
+        aCtx.bezierCurveTo(size * 0.33, y0 + (rand() - 0.5) * 18, size * 0.66, y0 + (rand() - 0.5) * 18, size, y0);
+        aCtx.stroke();
+
+        bCtx.strokeStyle = i % 2 === 0 ? '#707070' : '#949494';
+        bCtx.lineWidth = 1.5;
+        bCtx.beginPath();
+        bCtx.moveTo(0, y0);
+        bCtx.lineTo(size, y0);
+        bCtx.stroke();
+      }
+    } else {
+      // Carbon weave (knuckles, scopes, modern handguards)
+      aCtx.fillStyle = '#cfcfcf';
+      aCtx.fillRect(0, 0, size, size);
+      bCtx.fillStyle = '#808080';
+      bCtx.fillRect(0, 0, size, size);
+      rCtx.fillStyle = '#707070';
+      rCtx.fillRect(0, 0, size, size);
+      for (let y = 0; y < size; y += 8) {
+        for (let x = 0; x < size; x += 8) {
+          const alt = ((x + y) / 8) % 2 === 0;
+          aCtx.fillStyle = alt ? 'rgba(255,255,255,0.16)' : 'rgba(0,0,0,0.22)';
+          aCtx.fillRect(x, y, 7, 7);
+          bCtx.fillStyle = alt ? '#a2a2a2' : '#626262';
+          bCtx.fillRect(x, y, 7, 7);
+          rCtx.fillStyle = alt ? '#5e5e5e' : '#8c8c8c';
+          rCtx.fillRect(x, y, 7, 7);
+        }
+      }
+    }
+
+    const normalCanvas = this.createNormalCanvasFromHeight(bump, 2.0);
+    const map = new THREE.CanvasTexture(albedo);
+    map.colorSpace = THREE.SRGBColorSpace;
+    map.wrapS = THREE.RepeatWrapping;
+    map.wrapT = THREE.RepeatWrapping;
+    map.anisotropy = this.maxAnisotropy;
+
+    const bumpMap = new THREE.CanvasTexture(bump);
+    bumpMap.wrapS = THREE.RepeatWrapping;
+    bumpMap.wrapT = THREE.RepeatWrapping;
+
+    const normalMap = new THREE.CanvasTexture(normalCanvas);
+    normalMap.wrapS = THREE.RepeatWrapping;
+    normalMap.wrapT = THREE.RepeatWrapping;
+
+    const roughnessMap = new THREE.CanvasTexture(rough);
+    roughnessMap.wrapS = THREE.RepeatWrapping;
+    roughnessMap.wrapT = THREE.RepeatWrapping;
+
+    const pair = { map, bumpMap, normalMap, roughnessMap };
+    this.weaponCache.set(kind, pair);
+    return pair;
+  }
+
+  public createSkinTexture(baseHex: number): THREE.CanvasTexture {
+    const cached = this.skinCache.get(baseHex);
+    if (cached) return cached;
+
+    const size = 256;
+    const canvas = document.createElement('canvas');
+    canvas.width = size;
+    canvas.height = size;
+    const ctx = canvas.getContext('2d')!;
+
+    const base = new THREE.Color(baseHex);
+    const r = Math.round(base.r * 255);
+    const g = Math.round(base.g * 255);
+    const b = Math.round(base.b * 255);
+
+    ctx.fillStyle = `rgb(${r}, ${g}, ${b})`;
+    ctx.fillRect(0, 0, size, size);
+
+    // Subtle stylized subsurface warmth around cheeks/nose & darker eye-socket ambient shading
+    const blush = ctx.createRadialGradient(size * 0.5, size * 0.54, 10, size * 0.5, size * 0.54, 96);
+    blush.addColorStop(0, `rgba(${Math.min(255, r + 24)}, ${Math.max(0, g - 8)}, ${Math.max(0, b - 14)}, 0.28)`);
+    blush.addColorStop(1, 'rgba(0,0,0,0)');
+    ctx.fillStyle = blush;
+    ctx.fillRect(0, 0, size, size);
+
+    // Subtle beard/stubble jawline warmth at lower third
+    const jaw = ctx.createLinearGradient(0, size * 0.58, 0, size);
+    jaw.addColorStop(0, 'rgba(30, 20, 16, 0)');
+    jaw.addColorStop(1, 'rgba(42, 28, 22, 0.22)');
+    ctx.fillStyle = jaw;
+    ctx.fillRect(0, size * 0.58, size, size * 0.42);
+
+    const tex = new THREE.CanvasTexture(canvas);
+    tex.colorSpace = THREE.SRGBColorSpace;
+    tex.anisotropy = this.maxAnisotropy;
+    this.skinCache.set(baseHex, tex);
+    return tex;
   }
 
   public createSkyDomeTexture(zenithHex: number, horizonHex: number, cloudHex: number): THREE.CanvasTexture {
@@ -902,6 +1238,8 @@ class ProceduralTextureLibrary {
       }
     }
 
+    const normalCanvas = this.createNormalCanvasFromHeight(bump, 2.0);
+
     const map = new THREE.CanvasTexture(albedo);
     map.colorSpace = THREE.SRGBColorSpace;
     map.wrapS = THREE.RepeatWrapping;
@@ -912,11 +1250,15 @@ class ProceduralTextureLibrary {
     bumpMap.wrapS = THREE.RepeatWrapping;
     bumpMap.wrapT = THREE.RepeatWrapping;
 
+    const normalMap = new THREE.CanvasTexture(normalCanvas);
+    normalMap.wrapS = THREE.RepeatWrapping;
+    normalMap.wrapT = THREE.RepeatWrapping;
+
     const roughnessMap = new THREE.CanvasTexture(rough);
     roughnessMap.wrapS = THREE.RepeatWrapping;
     roughnessMap.wrapT = THREE.RepeatWrapping;
 
-    const pair = { map, bumpMap, roughnessMap };
+    const pair = { map, bumpMap, normalMap, roughnessMap };
     this.charCache.set(kind, pair);
     return pair;
   }
@@ -1672,13 +2014,221 @@ class ProceduralTextureLibrary {
       }
 
       case 'water': {
-        ctx.fillStyle = '#1f4e5c';
+        ctx.fillStyle = '#1f5363';
         ctx.fillRect(0, 0, w, h);
-        for (let i = 0; i < 60; i++) {
-          ctx.fillStyle = 'rgba(130, 210, 224, 0.16)';
-          ctx.fillRect(rand() * w, rand() * h, 35 + rand() * 55, 3);
+        bCtx.fillStyle = '#808080';
+        bCtx.fillRect(0, 0, w, h);
+        for (let i = 0; i < 85; i++) {
+          const wx = rand() * w;
+          const wy = rand() * h;
+          const ww = 32 + rand() * 68;
+          ctx.fillStyle = i % 2 === 0 ? 'rgba(130, 215, 232, 0.22)' : 'rgba(18, 62, 76, 0.24)';
+          ctx.fillRect(wx, wy, ww, 4);
+          bCtx.fillStyle = i % 2 === 0 ? '#a4a4a4' : '#646464';
+          bCtx.fillRect(wx, wy, ww, 4);
         }
         addGrain(ctx, 8);
+        break;
+      }
+
+      case 'roof_tile': {
+        ctx.fillStyle = '#a85338';
+        ctx.fillRect(0, 0, w, h);
+        bCtx.fillStyle = '#707070';
+        bCtx.fillRect(0, 0, w, h);
+        const rows = 8;
+        const cols = 12;
+        const rh = h / rows;
+        const cw = w / cols;
+        for (let r = 0; r < rows; r++) {
+          const y = r * rh;
+          for (let c = 0; c < cols; c++) {
+            const x = c * cw;
+            const s = Math.floor((rand() - 0.5) * 26);
+            const g = ctx.createLinearGradient(x, y, x + cw, y);
+            g.addColorStop(0, `rgb(${128 + s}, ${60 + Math.round(s * 0.5)}, ${40 + Math.round(s * 0.4)})`);
+            g.addColorStop(0.5, `rgb(${182 + s}, ${92 + Math.round(s * 0.5)}, ${62 + Math.round(s * 0.4)})`);
+            g.addColorStop(1, `rgb(${112 + s}, ${50 + Math.round(s * 0.5)}, ${34 + Math.round(s * 0.4)})`);
+            ctx.fillStyle = g;
+            ctx.fillRect(x + 1, y + 2, cw - 2, rh - 4);
+            ctx.fillStyle = 'rgba(28, 12, 8, 0.35)';
+            ctx.fillRect(x, y + rh - 5, cw, 5);
+
+            const bg = bCtx.createLinearGradient(x, y, x + cw, y);
+            bg.addColorStop(0, '#505050');
+            bg.addColorStop(0.5, '#d8d8d8');
+            bg.addColorStop(1, '#505050');
+            bCtx.fillStyle = bg;
+            bCtx.fillRect(x + 1, y + 2, cw - 2, rh - 5);
+          }
+        }
+        addGrain(ctx, 14);
+        break;
+      }
+
+      case 'window_glass': {
+        // Architectural multi-pane window with subtle interior depth & reflection diagonal
+        const grad = ctx.createLinearGradient(0, 0, w, h);
+        grad.addColorStop(0, '#4d6f8c');
+        grad.addColorStop(0.45, '#2b4359');
+        grad.addColorStop(1, '#1d2b38');
+        ctx.fillStyle = grad;
+        ctx.fillRect(0, 0, w, h);
+        ctx.fillStyle = 'rgba(210, 236, 255, 0.16)';
+        ctx.beginPath();
+        ctx.moveTo(0, h * 0.35);
+        ctx.lineTo(w * 0.65, 0);
+        ctx.lineTo(w * 0.88, 0);
+        ctx.lineTo(0, h * 0.58);
+        ctx.closePath();
+        ctx.fill();
+        // Mullions
+        ctx.fillStyle = '#252b33';
+        ctx.fillRect(0, 0, w, 16);
+        ctx.fillRect(0, h - 16, w, 16);
+        ctx.fillRect(0, 0, 16, h);
+        ctx.fillRect(w - 16, 0, 16, h);
+        ctx.fillRect(w / 2 - 6, 0, 12, h);
+        ctx.fillRect(0, h / 2 - 6, w, 12);
+        bCtx.fillStyle = '#606060';
+        bCtx.fillRect(0, 0, w, h);
+        bCtx.fillStyle = '#d0d0d0';
+        bCtx.fillRect(w / 2 - 6, 0, 12, h);
+        bCtx.fillRect(0, h / 2 - 6, w, 12);
+        break;
+      }
+
+      case 'wood_mahogany': {
+        ctx.fillStyle = '#5e3420';
+        ctx.fillRect(0, 0, w, h);
+        bCtx.fillStyle = '#808080';
+        bCtx.fillRect(0, 0, w, h);
+        for (let i = 0; i < 65; i++) {
+          const y0 = (i / 65) * h;
+          ctx.strokeStyle = i % 2 === 0 ? 'rgba(42, 18, 8, 0.35)' : 'rgba(128, 72, 42, 0.25)';
+          ctx.lineWidth = 2 + rand() * 3;
+          ctx.beginPath();
+          ctx.moveTo(0, y0);
+          ctx.bezierCurveTo(w * 0.3, y0 + (rand() - 0.5) * 18, w * 0.7, y0 + (rand() - 0.5) * 18, w, y0);
+          ctx.stroke();
+          bCtx.strokeStyle = i % 2 === 0 ? '#747474' : '#909090';
+          bCtx.lineWidth = 2;
+          bCtx.beginPath();
+          bCtx.moveTo(0, y0);
+          bCtx.lineTo(w, y0);
+          bCtx.stroke();
+        }
+        addGrain(ctx, 10);
+        break;
+      }
+
+      case 'carpet_office': {
+        ctx.fillStyle = '#3f4b59';
+        ctx.fillRect(0, 0, w, h);
+        bCtx.fillStyle = '#787878';
+        bCtx.fillRect(0, 0, w, h);
+        for (let y = 0; y < h; y += 64) {
+          for (let x = 0; x < w; x += 64) {
+            const alt = ((x + y) / 64) % 2 === 0 ? 7 : -7;
+            ctx.fillStyle = `rgb(${63 + alt}, ${75 + alt}, ${89 + alt})`;
+            ctx.fillRect(x + 1, y + 1, 62, 62);
+            bCtx.fillStyle = alt > 0 ? '#8c8c8c' : '#707070';
+            bCtx.fillRect(x + 1, y + 1, 62, 62);
+          }
+        }
+        addGrain(ctx, 18);
+        addGrain(bCtx, 18);
+        break;
+      }
+
+      case 'bark_palm': {
+        ctx.fillStyle = '#6f553b';
+        ctx.fillRect(0, 0, w, h);
+        bCtx.fillStyle = '#787878';
+        bCtx.fillRect(0, 0, w, h);
+        for (let y = 0; y < h; y += 32) {
+          ctx.fillStyle = 'rgba(42, 28, 16, 0.48)';
+          ctx.fillRect(0, y, w, 8);
+          ctx.fillStyle = 'rgba(154, 126, 92, 0.25)';
+          ctx.fillRect(0, y + 10, w, 14);
+          bCtx.fillStyle = '#404040';
+          bCtx.fillRect(0, y, w, 7);
+          bCtx.fillStyle = '#b4b4b4';
+          bCtx.fillRect(0, y + 8, w, 16);
+        }
+        addGrain(ctx, 18);
+        break;
+      }
+
+      case 'bark_pine': {
+        ctx.fillStyle = '#4c3828';
+        ctx.fillRect(0, 0, w, h);
+        bCtx.fillStyle = '#787878';
+        bCtx.fillRect(0, 0, w, h);
+        for (let i = 0; i < 90; i++) {
+          const x = rand() * w;
+          const y = rand() * h;
+          const pw = 10 + rand() * 18;
+          const ph = 26 + rand() * 44;
+          ctx.fillStyle = rand() > 0.5 ? 'rgba(34, 22, 14, 0.45)' : 'rgba(98, 72, 52, 0.32)';
+          ctx.fillRect(x, y, pw, ph);
+          bCtx.fillStyle = rand() > 0.5 ? '#b4b4b4' : '#4a4a4a';
+          bCtx.fillRect(x, y, pw, ph);
+        }
+        addGrain(ctx, 18);
+        break;
+      }
+
+      case 'foliage_leaf': {
+        ctx.fillStyle = '#385c2b';
+        ctx.fillRect(0, 0, w, h);
+        bCtx.fillStyle = '#787878';
+        bCtx.fillRect(0, 0, w, h);
+        for (let i = 0; i < 160; i++) {
+          const lx = rand() * w;
+          const ly = rand() * h;
+          const rx = 12 + rand() * 20;
+          const ry = 6 + rand() * 10;
+          const ang = rand() * Math.PI;
+          const gVal = 82 + Math.floor(rand() * 58);
+          ctx.fillStyle = `rgb(${Math.round(gVal * 0.52)}, ${gVal}, ${Math.round(gVal * 0.38)})`;
+          ctx.beginPath();
+          ctx.ellipse(lx, ly, rx, ry, ang, 0, Math.PI * 2);
+          ctx.fill();
+          bCtx.fillStyle = rand() > 0.5 ? '#b8b8b8' : '#585858';
+          bCtx.beginPath();
+          bCtx.ellipse(lx, ly, rx, ry, ang, 0, Math.PI * 2);
+          bCtx.fill();
+        }
+        addGrain(ctx, 14);
+        break;
+      }
+
+      case 'foliage_pine': {
+        ctx.fillStyle = '#253f31';
+        ctx.fillRect(0, 0, w, h);
+        bCtx.fillStyle = '#747474';
+        bCtx.fillRect(0, 0, w, h);
+        for (let i = 0; i < 200; i++) {
+          const x = rand() * w;
+          const y = rand() * h;
+          const ang = rand() * Math.PI * 2;
+          const len = 14 + rand() * 24;
+          const frosted = rand() > 0.72;
+          ctx.strokeStyle = frosted ? '#b6cedc' : rand() > 0.45 ? '#355c47' : '#1b3126';
+          ctx.lineWidth = 3 + rand() * 3;
+          ctx.beginPath();
+          ctx.moveTo(x, y);
+          ctx.lineTo(x + Math.cos(ang) * len, y + Math.sin(ang) * len);
+          ctx.stroke();
+          bCtx.strokeStyle = frosted ? '#d0d0d0' : '#969696';
+          bCtx.lineWidth = 3;
+          bCtx.beginPath();
+          bCtx.moveTo(x, y);
+          bCtx.lineTo(x + Math.cos(ang) * len, y + Math.sin(ang) * len);
+          bCtx.stroke();
+        }
+        addGrain(ctx, 12);
         break;
       }
     }

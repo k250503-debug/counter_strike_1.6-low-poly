@@ -2,12 +2,39 @@ import * as THREE from 'three';
 import { settingsManager } from './SettingsManager';
 import { WeaponId } from './types';
 
+export type VoiceCueType =
+  | 'go'
+  | 'lock_and_load'
+  | 'bomb_planted'
+  | 'bomb_defused'
+  | 'ct_win'
+  | 't_win'
+  | 'round_draw'
+  | 'fire_in_hole'
+  | 'enemy_spotted'
+  | 'first_blood'
+  | 'headshot'
+  | 'double_kill'
+  | 'multi_kill'
+  | 'mega_kill'
+  | 'monster_kill';
+
+interface QueuedVoiceCue {
+  type: VoiceCueType;
+  text: string;
+  priority: number;
+  rate: number;
+  pitch: number;
+  radioEffect: boolean;
+}
+
 /**
- * 100% Procedural 3D Spatial Web Audio Engine:
+ * 100% Procedural 3D Spatial Web Audio Engine + CS Tactical Radio & Announcer Voices:
  * - True Web Audio API PannerNode 3D spatialization synced to player camera
  * - Distance-based lowpass air absorption & indoor/outdoor acoustic reflections
  * - Distinct multi-layered synthesis for AK-47, M4A1, AWP, Deagle, SMGs, Shotguns, Pistols
  * - Synchronized reload stage mechanics, weapon switch clicks, footsteps, ricochets, & wind bed
+ * - Spoken Counter-Strike tactical radio commands, bomb status, team win calls, and multi-kill announcer
  */
 export class AudioManager {
   private ctx: AudioContext | null = null;
@@ -20,6 +47,13 @@ export class AudioManager {
 
   private listenerPos = new THREE.Vector3();
 
+  // SpeechSynthesis tactical radio & announcer state
+  private preferredVoice: SpeechSynthesisVoice | null = null;
+  private voiceQueue: QueuedVoiceCue[] = [];
+  private activeVoiceCue: QueuedVoiceCue | null = null;
+  private voiceCooldowns = new Map<VoiceCueType, number>();
+  private voiceDispatchTimer: number | null = null;
+
   constructor() {
     settingsManager.subscribe((s) => {
       if (this.masterSfx && this.ctx) {
@@ -29,7 +63,44 @@ export class AudioManager {
         this.masterMusic.gain.setTargetAtTime(s.musicVolume, this.ctx.currentTime, 0.05);
       }
     });
+
+    if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
+      this.refreshPreferredVoice();
+      window.speechSynthesis.addEventListener?.('voiceschanged', this.refreshPreferredVoice);
+    }
   }
+
+  private refreshPreferredVoice = (): void => {
+    if (typeof window === 'undefined' || !('speechSynthesis' in window)) return;
+    const voices = window.speechSynthesis.getVoices();
+    if (!voices || voices.length === 0) return;
+
+    const preferredNames = [
+      'google uk english male',
+      'microsoft george',
+      'microsoft ryan',
+      'microsoft david',
+      'microsoft mark',
+      'daniel',
+      'alex',
+      'fred',
+      'google us english',
+    ];
+
+    for (const target of preferredNames) {
+      const found = voices.find((v) => v.name.toLowerCase().includes(target));
+      if (found) {
+        this.preferredVoice = found;
+        return;
+      }
+    }
+
+    this.preferredVoice =
+      voices.find((v) => v.lang.toLowerCase().startsWith('en-gb')) ||
+      voices.find((v) => v.lang.toLowerCase().startsWith('en-us')) ||
+      voices.find((v) => v.lang.toLowerCase().startsWith('en')) ||
+      voices[0];
+  };
 
   public unlock(): void {
     if (!this.ctx) {
@@ -476,6 +547,32 @@ export class AudioManager {
     this.playReloadStage('bolt_rack', 1.65);
   }
 
+  public playWeaponInspect(): void {
+    if (this.isMuted || !this.ctx || !this.masterSfx || !this.noiseBuffer) return;
+    const ctx = this.ctx;
+    const now = ctx.currentTime;
+
+    // Soft cloth/sling shift + subtle metallic latch click
+    const n = ctx.createBufferSource();
+    n.buffer = this.noiseBuffer;
+    const bp = ctx.createBiquadFilter();
+    bp.type = 'bandpass';
+    bp.frequency.setValueAtTime(620, now);
+    bp.frequency.linearRampToValueAtTime(1050, now + 0.14);
+    bp.Q.value = 1.6;
+    const ng = ctx.createGain();
+    ng.gain.setValueAtTime(0.001, now);
+    ng.gain.linearRampToValueAtTime(0.075, now + 0.05);
+    ng.gain.exponentialRampToValueAtTime(0.001, now + 0.22);
+    n.connect(bp);
+    bp.connect(ng);
+    ng.connect(this.masterSfx);
+    n.start(now);
+    n.stop(now + 0.24);
+
+    this.playReloadStage('weapon_switch', 0.08);
+  }
+
   public playDryFire(): void {
     if (!this.ctx || !this.masterSfx) return;
     const ctx = this.ctx;
@@ -668,36 +765,384 @@ export class AudioManager {
     osc.stop(now + 0.09);
   }
 
-  public playRadioCue(type: 'go' | 'bomb_planted' | 'bomb_defused' | 'ct_win' | 't_win'): void {
-    if (!this.ctx || !this.masterSfx) return;
+  public playRadioCue(
+    type: 'go' | 'bomb_planted' | 'bomb_defused' | 'ct_win' | 't_win' | 'round_draw'
+  ): void {
+    if (!this.isMuted && this.ctx && this.masterSfx) {
+      const ctx = this.ctx;
+      const now = ctx.currentTime;
+      const notes =
+        type === 'go'
+          ? [520, 680]
+          : type === 'bomb_planted'
+          ? [620, 520, 780]
+          : type === 'bomb_defused'
+          ? [540, 720, 960]
+          : type === 'ct_win'
+          ? [440, 554, 659]
+          : type === 'round_draw'
+          ? [420, 420]
+          : [440, 392, 330];
+      notes.forEach((freq, i) => {
+        const osc = ctx.createOscillator();
+        osc.type = 'square';
+        osc.frequency.setValueAtTime(freq, now + i * 0.08);
+        const filter = ctx.createBiquadFilter();
+        filter.type = 'bandpass';
+        filter.frequency.value = 1100;
+        const gain = ctx.createGain();
+        gain.gain.setValueAtTime(0.08, now + i * 0.08);
+        gain.gain.exponentialRampToValueAtTime(0.001, now + i * 0.08 + 0.08);
+        osc.connect(filter);
+        filter.connect(gain);
+        gain.connect(this.masterSfx!);
+        osc.start(now + i * 0.08);
+        osc.stop(now + i * 0.08 + 0.09);
+      });
+    }
+
+    this.playVoiceLine(type);
+  }
+
+  private playRadioSquelch(isClosing = false): void {
+    if (this.isMuted || !this.ctx || !this.masterSfx || !this.noiseBuffer) return;
     const ctx = this.ctx;
     const now = ctx.currentTime;
-    const notes =
-      type === 'go'
-        ? [520, 680]
-        : type === 'bomb_planted'
-        ? [620, 520, 780]
-        : type === 'bomb_defused'
-        ? [540, 720, 960]
-        : type === 'ct_win'
-        ? [440, 554, 659]
-        : [440, 392, 330];
-    notes.forEach((freq, i) => {
+
+    // Tactical PTT mic click
+    const clickOsc = ctx.createOscillator();
+    clickOsc.type = 'triangle';
+    clickOsc.frequency.setValueAtTime(isClosing ? 920 : 1420, now);
+    clickOsc.frequency.exponentialRampToValueAtTime(isClosing ? 340 : 620, now + 0.022);
+    const clickGain = ctx.createGain();
+    clickGain.gain.setValueAtTime(0.11, now);
+    clickGain.gain.exponentialRampToValueAtTime(0.001, now + 0.026);
+    clickOsc.connect(clickGain);
+    clickGain.connect(this.masterSfx);
+    clickOsc.start(now);
+    clickOsc.stop(now + 0.03);
+
+    // Bandpass radio static squelch burst
+    const noise = ctx.createBufferSource();
+    noise.buffer = this.noiseBuffer;
+    const bp = ctx.createBiquadFilter();
+    bp.type = 'bandpass';
+    bp.frequency.setValueAtTime(isClosing ? 1350 : 1750, now);
+    bp.Q.value = 1.9;
+    const ng = ctx.createGain();
+    ng.gain.setValueAtTime(0.085, now);
+    ng.gain.exponentialRampToValueAtTime(0.001, now + (isClosing ? 0.065 : 0.055));
+    noise.connect(bp);
+    bp.connect(ng);
+    ng.connect(this.masterSfx);
+    noise.start(now);
+    noise.stop(now + 0.075);
+  }
+
+  private playAnnouncerStinger(type: VoiceCueType): void {
+    if (this.isMuted || !this.ctx || !this.masterSfx) return;
+    const ctx = this.ctx;
+    const now = ctx.currentTime;
+    const freqs =
+      type === 'monster_kill'
+        ? [110, 220, 330, 440]
+        : type === 'mega_kill'
+        ? [130, 260, 392]
+        : type === 'multi_kill'
+        ? [146, 293, 370]
+        : type === 'double_kill'
+        ? [164, 246]
+        : type === 'headshot'
+        ? [196, 392]
+        : [155, 233];
+
+    freqs.forEach((f, idx) => {
       const osc = ctx.createOscillator();
-      osc.type = 'square';
-      osc.frequency.setValueAtTime(freq, now + i * 0.08);
-      const filter = ctx.createBiquadFilter();
-      filter.type = 'bandpass';
-      filter.frequency.value = 1100;
+      osc.type = idx === 0 ? 'sawtooth' : 'triangle';
+      osc.frequency.setValueAtTime(f, now + idx * 0.03);
+      const lp = ctx.createBiquadFilter();
+      lp.type = 'lowpass';
+      lp.frequency.value = 1100;
       const gain = ctx.createGain();
-      gain.gain.setValueAtTime(0.11, now + i * 0.08);
-      gain.gain.exponentialRampToValueAtTime(0.001, now + i * 0.08 + 0.09);
-      osc.connect(filter);
-      filter.connect(gain);
+      gain.gain.setValueAtTime(0.09, now + idx * 0.03);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.34);
+      osc.connect(lp);
+      lp.connect(gain);
       gain.connect(this.masterSfx!);
-      osc.start(now + i * 0.08);
-      osc.stop(now + i * 0.08 + 0.1);
+      osc.start(now + idx * 0.03);
+      osc.stop(now + 0.36);
     });
+  }
+
+  private buildVoiceCue(type: VoiceCueType): QueuedVoiceCue {
+    const goVariants = ['Go! Go! Go!', "Okay, let's move out!", 'Storm the front!'];
+    switch (type) {
+      case 'go':
+        return {
+          type,
+          text: goVariants[Math.floor(Math.random() * goVariants.length)],
+          priority: 2,
+          rate: 1.12,
+          pitch: 0.9,
+          radioEffect: true,
+        };
+      case 'lock_and_load':
+        return {
+          type,
+          text: 'Lock and load. Go! Go! Go!',
+          priority: 2,
+          rate: 1.08,
+          pitch: 0.88,
+          radioEffect: true,
+        };
+      case 'bomb_planted':
+        return {
+          type,
+          text: 'The bomb has been planted.',
+          priority: 3,
+          rate: 1.02,
+          pitch: 0.86,
+          radioEffect: true,
+        };
+      case 'bomb_defused':
+        return {
+          type,
+          text: 'The bomb has been defused.',
+          priority: 3,
+          rate: 1.02,
+          pitch: 0.88,
+          radioEffect: true,
+        };
+      case 'ct_win':
+        return {
+          type,
+          text: 'Counter-Terrorists win!',
+          priority: 3,
+          rate: 0.98,
+          pitch: 0.82,
+          radioEffect: false,
+        };
+      case 't_win':
+        return {
+          type,
+          text: 'Terrorists win!',
+          priority: 3,
+          rate: 0.98,
+          pitch: 0.8,
+          radioEffect: false,
+        };
+      case 'round_draw':
+        return {
+          type,
+          text: 'Round draw.',
+          priority: 3,
+          rate: 1.0,
+          pitch: 0.84,
+          radioEffect: false,
+        };
+      case 'fire_in_hole':
+        return {
+          type,
+          text: 'Fire in the hole!',
+          priority: 1,
+          rate: 1.15,
+          pitch: 0.92,
+          radioEffect: true,
+        };
+      case 'enemy_spotted':
+        return {
+          type,
+          text: 'Enemy spotted.',
+          priority: 1,
+          rate: 1.1,
+          pitch: 0.9,
+          radioEffect: true,
+        };
+      case 'first_blood':
+        return {
+          type,
+          text: 'First blood!',
+          priority: 2,
+          rate: 1.04,
+          pitch: 0.78,
+          radioEffect: false,
+        };
+      case 'headshot':
+        return {
+          type,
+          text: 'Headshot!',
+          priority: 2,
+          rate: 1.08,
+          pitch: 0.78,
+          radioEffect: false,
+        };
+      case 'double_kill':
+        return {
+          type,
+          text: 'Double kill!',
+          priority: 2,
+          rate: 1.06,
+          pitch: 0.78,
+          radioEffect: false,
+        };
+      case 'multi_kill':
+        return {
+          type,
+          text: 'Multi kill!',
+          priority: 2,
+          rate: 1.05,
+          pitch: 0.75,
+          radioEffect: false,
+        };
+      case 'mega_kill':
+        return {
+          type,
+          text: 'Mega kill!',
+          priority: 2,
+          rate: 1.03,
+          pitch: 0.74,
+          radioEffect: false,
+        };
+      case 'monster_kill':
+        return {
+          type,
+          text: 'Monster kill!',
+          priority: 2,
+          rate: 1.0,
+          pitch: 0.7,
+          radioEffect: false,
+        };
+    }
+  }
+
+  public playVoiceLine(type: VoiceCueType): void {
+    if (this.isMuted) return;
+    const vol = settingsManager.get().soundVolume;
+    if (vol <= 0.01) return;
+    if (typeof window === 'undefined' || !('speechSynthesis' in window)) return;
+
+    const now = performance.now();
+    const cooldownMs =
+      type === 'enemy_spotted' ? 7000 : type === 'fire_in_hole' ? 1400 : 120;
+    const lastPlayed = this.voiceCooldowns.get(type) ?? 0;
+    if (now - lastPlayed < cooldownMs) return;
+    this.voiceCooldowns.set(type, now);
+
+    const cue = this.buildVoiceCue(type);
+
+    if (this.activeVoiceCue) {
+      if (cue.priority < this.activeVoiceCue.priority) {
+        // Ignore low-priority radio chatter when a critical announcement is speaking
+        return;
+      }
+      if (cue.priority === 3 && this.activeVoiceCue.priority === 3) {
+        // Queue critical sequential announcements (e.g., bomb_defused -> ct_win)
+        if (this.voiceQueue.length < 3) {
+          this.voiceQueue.push(cue);
+        }
+        return;
+      }
+      // Higher-priority event or escalating killstreak interrupts lower/equal chatter
+      this.voiceQueue = this.voiceQueue.filter((q) => q.priority >= 3);
+      if (this.voiceDispatchTimer !== null) {
+        window.clearTimeout(this.voiceDispatchTimer);
+        this.voiceDispatchTimer = null;
+      }
+      try {
+        window.speechSynthesis.cancel();
+      } catch {
+        // ignore
+      }
+      this.activeVoiceCue = null;
+      this.voiceDispatchTimer = window.setTimeout(() => {
+        this.voiceDispatchTimer = null;
+        this.speakCue(cue);
+      }, 45);
+      return;
+    }
+
+    this.speakCue(cue);
+  }
+
+  private speakCue(cue: QueuedVoiceCue): void {
+    if (this.isMuted) return;
+    const vol = settingsManager.get().soundVolume;
+    if (vol <= 0.01) return;
+    if (typeof window === 'undefined' || !('speechSynthesis' in window)) return;
+
+    if (!this.preferredVoice) {
+      this.refreshPreferredVoice();
+    }
+
+    const utterance = new SpeechSynthesisUtterance(cue.text);
+    if (this.preferredVoice) {
+      utterance.voice = this.preferredVoice;
+      utterance.lang = this.preferredVoice.lang || 'en-US';
+    } else {
+      utterance.lang = 'en-US';
+    }
+    utterance.rate = cue.rate;
+    utterance.pitch = cue.pitch;
+    utterance.volume = Math.max(0.05, Math.min(1, vol * (cue.radioEffect ? 0.92 : 1)));
+
+    this.activeVoiceCue = cue;
+
+    if (cue.radioEffect) {
+      this.playRadioSquelch(false);
+    } else if (
+      cue.type === 'first_blood' ||
+      cue.type === 'headshot' ||
+      cue.type === 'double_kill' ||
+      cue.type === 'multi_kill' ||
+      cue.type === 'mega_kill' ||
+      cue.type === 'monster_kill'
+    ) {
+      this.playAnnouncerStinger(cue.type);
+    }
+
+    let finished = false;
+    const safetyTimer = window.setTimeout(() => finalize(), 3600);
+
+    const finalize = () => {
+      if (finished) return;
+      finished = true;
+      window.clearTimeout(safetyTimer);
+      if (cue.radioEffect && !this.isMuted) {
+        this.playRadioSquelch(true);
+      }
+      if (this.activeVoiceCue === cue) {
+        this.activeVoiceCue = null;
+      }
+      const next = this.voiceQueue.shift();
+      if (next) {
+        this.speakCue(next);
+      }
+    };
+
+    utterance.onend = finalize;
+    utterance.onerror = finalize;
+
+    try {
+      window.speechSynthesis.speak(utterance);
+    } catch {
+      finalize();
+    }
+  }
+
+  public stopAllVoices(): void {
+    this.voiceQueue = [];
+    this.activeVoiceCue = null;
+    if (this.voiceDispatchTimer !== null && typeof window !== 'undefined') {
+      window.clearTimeout(this.voiceDispatchTimer);
+      this.voiceDispatchTimer = null;
+    }
+    if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
+      try {
+        window.speechSynthesis.cancel();
+      } catch {
+        // ignore
+      }
+    }
   }
 }
 

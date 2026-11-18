@@ -27,6 +27,7 @@ export interface CharacterAnimOptions {
   deathStyle?: number;
   baseY?: number;
   dt?: number;
+  sprint?: boolean;
 }
 
 interface BlendState {
@@ -82,6 +83,7 @@ export function updateBlendedCharacterPose(
     deathStyle = 0,
     baseY = rig.root.position.y,
     dt: optDt,
+    sprint = false,
   } = opts;
 
   const st = getBlendState(rig, time);
@@ -157,7 +159,10 @@ export function updateBlendedCharacterPose(
 
   // Smooth exponential state weights
   const targetWalk = speedRatio > 0.08 ? THREE.MathUtils.clamp(speedRatio / 0.65, 0, 1) : 0;
-  const targetRun = speedRatio > 0.65 && !crouching ? THREE.MathUtils.clamp((speedRatio - 0.65) / 0.4, 0, 1) : 0;
+  const targetRun =
+    !crouching && (sprint || speedRatio > 0.65)
+      ? Math.max(sprint ? 0.9 : 0, THREE.MathUtils.clamp((speedRatio - 0.65) / 0.4, 0, 1))
+      : 0;
   const targetCrouch = crouching ? 1 : 0;
   const targetAir = onGround ? 0 : 1;
   const targetReload = isReloading ? 1 : 0;

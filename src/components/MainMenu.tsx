@@ -156,7 +156,7 @@ export function MainMenu({
             </div>
           </div>
 
-          <div className="grid grid-cols-4 sm:grid-cols-8 gap-1">
+          <div className="grid grid-cols-4 sm:grid-cols-6 gap-1">
             {MAPS_METADATA.map((map) => {
               const isActive = map.id === activeMenuMap;
               return (
@@ -164,7 +164,7 @@ export function MainMenu({
                   key={map.id}
                   type="button"
                   onClick={() => handleAction(() => onSelectMenuMap(map.id))}
-                  className={`px-2 py-1 text-[11px] font-display uppercase tracking-wider border transition-colors cursor-pointer ${
+                  className={`px-2 py-1 text-[11px] font-display uppercase tracking-wider border transition-colors whitespace-nowrap cursor-pointer ${
                     isActive
                       ? 'bg-[#f5b841]/25 border-[#f5b841] text-white font-semibold'
                       : 'bg-white/[0.04] border-white/15 text-white/65 hover:bg-white/12 hover:border-white/40 hover:text-white'

@@ -209,6 +209,7 @@ export function updateBotAI(
     animateCharacterPose(bot.rig, time, 0, false, 0, true, bot.deathTimer, {
       deathStyle: bot.deathStyle,
       baseY: bot.position.y,
+      dt,
     });
     return;
   }
@@ -246,7 +247,7 @@ export function updateBotAI(
     if (!isFreeForAll && t.team === bot.team) continue;
 
     const d = bot.position.distanceTo(t.position);
-    if (d > 62) continue;
+    if (d > 78) continue;
 
     _targetEye.set(t.position.x, t.position.y + 1.35, t.position.z);
     _dir.subVectors(_targetEye, _eyeOrigin);
@@ -294,6 +295,7 @@ export function updateBotAI(
       bot.rig.root.rotation.y = bot.yaw;
       animateCharacterPose(bot.rig, time, bot.speedRatio, true, bot.recoilKick, false, 0, {
         hitFlinch: bot.hitFlinch,
+        dt,
       });
       return;
     }
@@ -315,6 +317,7 @@ export function updateBotAI(
         bot.rig.root.rotation.y = bot.yaw;
         animateCharacterPose(bot.rig, time, bot.speedRatio, true, bot.recoilKick, false, 0, {
           hitFlinch: bot.hitFlinch,
+          dt,
         });
         return;
       }
@@ -397,20 +400,12 @@ export function updateBotAI(
           : bot.alertPos
           ? bot.alertPos
           : bot.hasC4 && bombsites.length > 0
-          ? new THREE.Vector3(bombsites[0].x, 0, bombsites[0].z)
+          ? new THREE.Vector3(bombsites[0].x, bombsites[0].y, bombsites[0].z)
           : null;
 
       if (goalPos) {
-        let bestScore = Infinity;
-        for (const nid of pool) {
-          const nw = waypoints.find((w) => w.id === nid);
-          if (!nw) continue;
-          const d = Math.hypot(nw.x - goalPos.x, nw.z - goalPos.z);
-          if (d < bestScore) {
-            bestScore = d;
-            nextId = nid;
-          }
-        }
+        const goalWp = findClosestWaypoint(goalPos, waypoints);
+        nextId = findBfsNextHop(waypoints, current.id, goalWp.id, pool);
       }
 
       bot.lastWaypointId = current.id;
@@ -453,6 +448,8 @@ export function updateBotAI(
     isReloading: bot.reloadTimer > 0,
     hitFlinch: bot.hitFlinch,
     aimPitch,
+    dt,
+    sprint: bot.state === 'INVESTIGATE',
   });
 }
 
@@ -460,13 +457,57 @@ function findClosestWaypoint(pos: THREE.Vector3, waypoints: WaypointNode[]): Way
   let best = waypoints[0];
   let bestD = Infinity;
   for (const w of waypoints) {
-    const d = Math.hypot(w.x - pos.x, w.z - pos.z);
+    const d = Math.hypot(w.x - pos.x, w.z - pos.z) + Math.abs(w.y - pos.y) * 2.5;
     if (d < bestD) {
       bestD = d;
       best = w;
     }
   }
   return best;
+}
+
+function findBfsNextHop(
+  waypoints: WaypointNode[],
+  startId: string,
+  goalId: string,
+  fallbackPool: string[]
+): string {
+  if (startId === goalId) {
+    return fallbackPool[Math.floor(Math.random() * fallbackPool.length)];
+  }
+  const byId = new Map<string, WaypointNode>();
+  for (const w of waypoints) byId.set(w.id, w);
+
+  const visited = new Set<string>([startId]);
+  const firstHop = new Map<string, string>();
+  const queue: string[] = [];
+
+  const startNode = byId.get(startId);
+  if (startNode) {
+    for (const n of startNode.neighbors) {
+      if (n === goalId) return n;
+      visited.add(n);
+      firstHop.set(n, n);
+      queue.push(n);
+    }
+  }
+
+  let head = 0;
+  while (head < queue.length) {
+    const cur = queue[head++];
+    const hop = firstHop.get(cur)!;
+    const node = byId.get(cur);
+    if (!node) continue;
+    for (const next of node.neighbors) {
+      if (next === goalId) return hop;
+      if (!visited.has(next)) {
+        visited.add(next);
+        firstHop.set(next, hop);
+        queue.push(next);
+      }
+    }
+  }
+  return fallbackPool[Math.floor(Math.random() * fallbackPool.length)];
 }
 
 function moveBotWithCollision(bot: BotContext, dx: number, dz: number, colliders: ColliderBox[]): void {

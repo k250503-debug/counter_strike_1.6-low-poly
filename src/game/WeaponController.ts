@@ -1,20 +1,31 @@
 import * as THREE from 'three';
+import { disposeObjectSubtree } from '../utils/threeDisposal';
 import { audioManager } from './AudioManager';
+import { textures } from './ProceduralTextures';
 import { WEAPON_DATABASE } from './WeaponDatabase';
-import { buildFirstPersonHands, buildWeaponModel } from './WeaponModels';
-import { Team, WeaponId, WeaponInstance, CharacterClassId } from './types';
+import {
+  buildFirstPersonHands,
+  buildWeaponModel,
+  getWeaponViewMeta,
+  SHARED_WEAPON_MATERIALS,
+  WeaponViewMeta,
+} from './WeaponModels';
+import { CharacterClassId, Team, WeaponId, WeaponInstance } from './types';
 
 export class WeaponController {
   public viewRoot = new THREE.Group();
   private weaponPivot = new THREE.Group();
   private handsGroup: THREE.Group;
   private currentModel: THREE.Group | null = null;
-  private muzzleFlashMesh: THREE.Mesh;
+  private muzzleFlashGroup: THREE.Group;
+  private muzzlePoint = new THREE.Object3D();
+  private ejectPoint = new THREE.Object3D();
 
   private activeWeaponId: WeaponId = 'usp';
   private activeTeam: Team = 'CT';
   private activeClassId: CharacterClassId | undefined = 'classic_ct';
   private activeSilenced = true;
+  private activeMeta: WeaponViewMeta = getWeaponViewMeta('usp', true);
 
   public recoilPitch = 0;
   public recoilYaw = 0;
@@ -37,6 +48,10 @@ export class WeaponController {
   private reloadDuration = 2.0;
   private reloadStageFired = { out: false, in: false, rack: false };
 
+  public isInspecting = false;
+  private inspectTimer = 0;
+  private inspectDuration = 2.45;
+
   private swayX = 0;
   private swayY = 0;
   private idleTime = 0;
@@ -55,16 +70,34 @@ export class WeaponController {
     this.weaponPivot.add(this.handsGroup);
     this.cacheHandParts();
 
-    // Multi-layered stylized muzzle flash star geometry
-    const flashGeo = new THREE.OctahedronGeometry(0.065, 0);
-    const flashMat = new THREE.MeshBasicMaterial({
-      color: 0xffd57a,
+    this.weaponPivot.add(this.muzzlePoint);
+    this.weaponPivot.add(this.ejectPoint);
+
+    // Stylized soft radial star muzzle flash (crossed textured glow planes + bright core)
+    this.muzzleFlashGroup = new THREE.Group();
+    const muzzleTex = textures.createSoftParticleTexture('muzzle');
+    const flashPlaneMat = new THREE.MeshBasicMaterial({
+      map: muzzleTex,
+      color: 0xffe4a0,
       transparent: true,
-      opacity: 0.92,
+      opacity: 0.94,
+      depthWrite: false,
+      blending: THREE.AdditiveBlending,
+      side: THREE.DoubleSide,
     });
-    this.muzzleFlashMesh = new THREE.Mesh(flashGeo, flashMat);
-    this.muzzleFlashMesh.visible = false;
-    this.weaponPivot.add(this.muzzleFlashMesh);
+    const flashGeo = new THREE.PlaneGeometry(0.24, 0.24);
+    const p1 = new THREE.Mesh(flashGeo, flashPlaneMat);
+    const p2 = new THREE.Mesh(flashGeo, flashPlaneMat);
+    p2.rotation.y = Math.PI / 2;
+    const p3 = new THREE.Mesh(flashGeo, flashPlaneMat);
+    p3.rotation.x = Math.PI / 2;
+    this.muzzleFlashGroup.add(p1, p2, p3);
+    p1.userData.excludeFromAO = true;
+    p2.userData.excludeFromAO = true;
+    p3.userData.excludeFromAO = true;
+    this.muzzleFlashGroup.userData.excludeFromAO = true;
+    this.muzzleFlashGroup.visible = false;
+    this.muzzlePoint.add(this.muzzleFlashGroup);
   }
 
   private cacheHandParts(): void {
@@ -86,33 +119,39 @@ export class WeaponController {
     this.chargingPart = this.currentModel.getObjectByName('charging_handle') ?? null;
   }
 
-  private disposeSubtree(root: THREE.Object3D): void {
-    root.traverse((obj) => {
-      const mesh = obj as THREE.Mesh;
-      if (mesh.geometry) mesh.geometry.dispose();
-      const mat = (obj as { material?: THREE.Material | THREE.Material[] }).material;
-      if (Array.isArray(mat)) mat.forEach((m) => m.dispose());
-      else if (mat) mat.dispose();
-    });
-  }
-
   public setTeam(team: Team, classId?: CharacterClassId): void {
     if (this.activeTeam === team && this.activeClassId === classId) return;
     this.activeTeam = team;
     this.activeClassId = classId;
     this.weaponPivot.remove(this.handsGroup);
-    this.disposeSubtree(this.handsGroup);
+    disposeObjectSubtree(this.handsGroup, undefined, SHARED_WEAPON_MATERIALS);
     this.handsGroup = buildFirstPersonHands(team, classId);
     this.weaponPivot.add(this.handsGroup);
     this.cacheHandParts();
+    this.applyImmediateHandPose();
+  }
+
+  private applyImmediateHandPose(): void {
+    const m = this.activeMeta;
+    if (this.rightArmPart) {
+      this.rightArmPart.position.set(m.rightHandPos[0], m.rightHandPos[1], m.rightHandPos[2]);
+      this.rightArmPart.rotation.set(m.rightHandRot[0], m.rightHandRot[1], m.rightHandRot[2]);
+    }
+    if (this.leftArmPart) {
+      this.leftArmPart.position.set(m.leftHandPos[0], m.leftHandPos[1], m.leftHandPos[2]);
+      this.leftArmPart.rotation.set(m.leftHandRot[0], m.leftHandRot[1], m.leftHandRot[2]);
+    }
   }
 
   public equip(inst: WeaponInstance): void {
     const same = this.activeWeaponId === inst.id && this.activeSilenced === Boolean(inst.silenced);
     this.activeWeaponId = inst.id;
     this.activeSilenced = Boolean(inst.silenced);
+    this.activeMeta = getWeaponViewMeta(inst.id, Boolean(inst.silenced));
     this.isReloading = false;
     this.reloadTimer = 0;
+    this.isInspecting = false;
+    this.inspectTimer = 0;
     this.boltCycleAnim = 0;
     this.shotCount = 0;
     this.shotResetTimer = 0;
@@ -122,7 +161,7 @@ export class WeaponController {
     if (!same || !this.currentModel) {
       if (this.currentModel) {
         this.weaponPivot.remove(this.currentModel);
-        this.disposeSubtree(this.currentModel);
+        disposeObjectSubtree(this.currentModel, undefined, SHARED_WEAPON_MATERIALS);
       }
       this.currentModel = buildWeaponModel(inst.id, Boolean(inst.silenced));
       this.weaponPivot.add(this.currentModel);
@@ -131,7 +170,6 @@ export class WeaponController {
 
     audioManager.playReloadStage('weapon_switch');
 
-    // Reset sub-parts
     if (this.magPart) this.magPart.position.set(0, 0, 0);
     if (this.slidePart) this.slidePart.position.set(0, 0, 0);
     if (this.boltPart) {
@@ -140,21 +178,34 @@ export class WeaponController {
     }
     if (this.chargingPart) this.chargingPart.position.set(0, 0, 0);
 
-    // Classic CS 1.6 first-person viewmodel framing
-    const def = WEAPON_DATABASE[inst.id];
-    if (inst.id === 'knife') {
-      this.weaponPivot.position.set(0.21, -0.21, -0.32);
-      this.weaponPivot.rotation.set(0.14, 0.22, -0.18);
-    } else if (def.slot === 'grenade' || inst.id === 'c4') {
-      this.weaponPivot.position.set(0.21, -0.22, -0.31);
-      this.weaponPivot.rotation.set(0.08, 0.14, 0);
-    } else if (def.slot === 'secondary') {
-      this.weaponPivot.position.set(0.19, -0.19, -0.33);
-      this.weaponPivot.rotation.set(0.025, 0.06, 0.02);
-    } else {
-      this.weaponPivot.position.set(0.2, -0.195, -0.32);
-      this.weaponPivot.rotation.set(0.025, 0.06, 0.02);
+    const m = this.activeMeta;
+    this.muzzlePoint.position.set(0, m.muzzleY, m.muzzleZ);
+    this.ejectPoint.position.set(m.ejectPos[0], m.ejectPos[1], m.ejectPos[2]);
+    this.weaponPivot.position.set(m.pivotPos[0], m.pivotPos[1], m.pivotPos[2]);
+    this.weaponPivot.rotation.set(m.pivotRot[0], m.pivotRot[1], m.pivotRot[2]);
+    this.applyImmediateHandPose();
+  }
+
+  public startInspect(): void {
+    if (this.isReloading || this.zoomLevel > 0 || this.switchAnim > 0.35) return;
+    if (this.isInspecting) {
+      this.isInspecting = false;
+      this.inspectTimer = 0;
+      return;
     }
+    this.isInspecting = true;
+    this.inspectTimer = this.inspectDuration;
+    audioManager.playWeaponInspect();
+  }
+
+  public getMuzzleWorldPosition(out: THREE.Vector3): THREE.Vector3 {
+    this.muzzlePoint.updateWorldMatrix(true, false);
+    return this.muzzlePoint.getWorldPosition(out);
+  }
+
+  public getEjectionWorldPosition(out: THREE.Vector3): THREE.Vector3 {
+    this.ejectPoint.updateWorldMatrix(true, false);
+    return this.ejectPoint.getWorldPosition(out);
   }
 
   public addSway(dx: number, dy: number): void {
@@ -167,6 +218,8 @@ export class WeaponController {
     if (this.isReloading || def.magazineSize <= 0) return false;
     if (inst.ammoInMag >= def.magazineSize || inst.ammoReserve <= 0) return false;
     this.isReloading = true;
+    this.isInspecting = false;
+    this.inspectTimer = 0;
     this.zoomLevel = 0;
     this.boltCycleAnim = 0;
     this.reloadDuration = def.reloadTime;
@@ -176,6 +229,8 @@ export class WeaponController {
   }
 
   public tryToggleAltFire(inst: WeaponInstance): void {
+    this.isInspecting = false;
+    this.inspectTimer = 0;
     const def = WEAPON_DATABASE[inst.id];
     if (def.zoomFov) {
       if (def.hasSecondZoom) {
@@ -200,6 +255,8 @@ export class WeaponController {
 
   public triggerKnifeStab(): boolean {
     if (!this.canFire() || this.activeWeaponId !== 'knife') return false;
+    this.isInspecting = false;
+    this.inspectTimer = 0;
     this.fireCooldown = 0.85;
     this.heavyStabAnim = 1.0;
     audioManager.playKnifeSlash();
@@ -208,6 +265,8 @@ export class WeaponController {
 
   public triggerFire(inst: WeaponInstance): boolean {
     if (!this.canFire()) return false;
+    this.isInspecting = false;
+    this.inspectTimer = 0;
     const def = WEAPON_DATABASE[inst.id];
 
     if (def.slot === 'knife') {
@@ -240,10 +299,9 @@ export class WeaponController {
       this.zoomLevel = 0;
     }
     if (!inst.silenced && inst.id !== 'tmp') {
-      this.flashTimer = 0.045;
+      this.flashTimer = 0.048;
     }
 
-    // Authentic CS 1.6 recoil curve: crisp vertical first 3 shots, then structured T-pattern sweep
     const climbMult = this.shotCount <= 3 ? 0.88 : this.shotCount <= 8 ? 1.05 : 0.72;
     this.recoilPitch += def.recoilKick * climbMult;
     if (this.shotCount > 2) {
@@ -282,7 +340,7 @@ export class WeaponController {
     this.boltCycleAnim = Math.max(0, this.boltCycleAnim - dt * (inst.id === 'awp' ? 0.95 : 1.35));
     this.sprintBlend = THREE.MathUtils.damp(
       this.sprintBlend,
-      isSprinting && !this.isReloading && this.zoomLevel === 0 ? 1 : 0,
+      isSprinting && !this.isReloading && !this.isInspecting && this.zoomLevel === 0 ? 1 : 0,
       10,
       dt
     );
@@ -294,7 +352,6 @@ export class WeaponController {
       }
     }
 
-    // Recoil & spread recovery
     this.recoilPitch = THREE.MathUtils.damp(this.recoilPitch, 0, 10.5, dt);
     this.recoilYaw = THREE.MathUtils.damp(this.recoilYaw, 0, 10.5, dt);
     this.spreadPenalty = THREE.MathUtils.damp(this.spreadPenalty, 0, 8.5, dt);
@@ -302,8 +359,8 @@ export class WeaponController {
     this.swayX = THREE.MathUtils.damp(this.swayX, 0, 10, dt);
     this.swayY = THREE.MathUtils.damp(this.swayY, 0, 10, dt);
 
-    // Multi-stage synchronized Reload completion & audio cues
     const def = WEAPON_DATABASE[inst.id];
+    const m = this.activeMeta;
     let reloadDip = 0;
     let reloadRoll = 0;
     let reloadPitch = 0;
@@ -325,13 +382,11 @@ export class WeaponController {
         audioManager.playReloadStage('bolt_rack');
       }
 
-      // Tilt rifle inward so magazine & bolt are clearly animated in first-person view
       const envelope = Math.sin(p * Math.PI);
-      reloadDip = envelope * 0.08;
-      reloadRoll = -envelope * 0.42;
-      reloadPitch = envelope * 0.28;
+      reloadDip = envelope * 0.075;
+      reloadRoll = -envelope * 0.4;
+      reloadPitch = envelope * 0.25;
 
-      // Animate magazine physically sliding out and snapping back in
       if (this.magPart) {
         if (p < 0.2) {
           this.magPart.position.y = -(p / 0.2) * 0.02;
@@ -348,16 +403,27 @@ export class WeaponController {
         }
       }
 
-      // Animate left hand reaching to magwell, dropping mag, then racking charging handle
       if (this.leftArmPart) {
         if (p < 0.72) {
           const handDrop = Math.sin(Math.min(1, p / 0.72) * Math.PI);
-          this.leftArmPart.position.set(0.04 * handDrop, -0.14 * handDrop, 0.08 * handDrop);
-          this.leftArmPart.rotation.set(0.35 * handDrop, 0.18 * handDrop, 0.25 * handDrop);
+          this.leftArmPart.position.set(
+            THREE.MathUtils.lerp(m.leftHandPos[0], 0.02, handDrop),
+            THREE.MathUtils.lerp(m.leftHandPos[1], -0.18, handDrop),
+            THREE.MathUtils.lerp(m.leftHandPos[2], -0.05, handDrop)
+          );
+          this.leftArmPart.rotation.set(
+            m.leftHandRot[0] + 0.35 * handDrop,
+            m.leftHandRot[1] + 0.18 * handDrop,
+            m.leftHandRot[2] + 0.2 * handDrop
+          );
         } else {
           const rackT = Math.sin(((p - 0.72) / 0.28) * Math.PI);
-          this.leftArmPart.position.set(0.04 * rackT, 0.03 * rackT, 0.14 * rackT);
-          this.leftArmPart.rotation.set(0, -0.12 * rackT, 0);
+          this.leftArmPart.position.set(
+            THREE.MathUtils.lerp(m.leftHandPos[0], -0.02, rackT),
+            THREE.MathUtils.lerp(m.leftHandPos[1], 0.04, rackT),
+            THREE.MathUtils.lerp(m.leftHandPos[2], -0.04, rackT)
+          );
+          this.leftArmPart.rotation.set(m.leftHandRot[0], m.leftHandRot[1] - 0.14 * rackT, m.leftHandRot[2]);
           if (this.chargingPart) {
             this.chargingPart.position.z = rackT * 0.055;
           }
@@ -376,15 +442,13 @@ export class WeaponController {
         inst.ammoInMag += take;
         inst.ammoReserve -= take;
       }
-    } else {
-      if (this.leftArmPart) {
-        this.leftArmPart.position.x = THREE.MathUtils.damp(this.leftArmPart.position.x, 0, 14, dt);
-        this.leftArmPart.position.y = THREE.MathUtils.damp(this.leftArmPart.position.y, 0, 14, dt);
-        this.leftArmPart.position.z = THREE.MathUtils.damp(this.leftArmPart.position.z, 0, 14, dt);
-        this.leftArmPart.rotation.x = THREE.MathUtils.damp(this.leftArmPart.rotation.x, 0, 14, dt);
-        this.leftArmPart.rotation.y = THREE.MathUtils.damp(this.leftArmPart.rotation.y, 0, 14, dt);
-        this.leftArmPart.rotation.z = THREE.MathUtils.damp(this.leftArmPart.rotation.z, 0, 14, dt);
-      }
+    } else if (this.leftArmPart) {
+      this.leftArmPart.position.x = THREE.MathUtils.damp(this.leftArmPart.position.x, m.leftHandPos[0], 14, dt);
+      this.leftArmPart.position.y = THREE.MathUtils.damp(this.leftArmPart.position.y, m.leftHandPos[1], 14, dt);
+      this.leftArmPart.position.z = THREE.MathUtils.damp(this.leftArmPart.position.z, m.leftHandPos[2], 14, dt);
+      this.leftArmPart.rotation.x = THREE.MathUtils.damp(this.leftArmPart.rotation.x, m.leftHandRot[0], 14, dt);
+      this.leftArmPart.rotation.y = THREE.MathUtils.damp(this.leftArmPart.rotation.y, m.leftHandRot[1], 14, dt);
+      this.leftArmPart.rotation.z = THREE.MathUtils.damp(this.leftArmPart.rotation.z, m.leftHandRot[2], 14, dt);
       if (this.chargingPart) {
         this.chargingPart.position.z = THREE.MathUtils.damp(this.chargingPart.position.z, 0, 16, dt);
       }
@@ -398,40 +462,71 @@ export class WeaponController {
     // AWP / Scout post-shot bolt-action cycling animation
     let boltTilt = 0;
     if (this.boltPart && this.boltCycleAnim > 0 && !this.isReloading) {
-      const bPhase = 1 - this.boltCycleAnim; // 0..1
+      const bPhase = 1 - this.boltCycleAnim;
       if (bPhase > 0.18 && bPhase < 0.88) {
         const arc = Math.sin(((bPhase - 0.18) / 0.7) * Math.PI);
         this.boltPart.rotation.z = arc * 0.85;
         this.boltPart.position.z = arc * 0.075;
         boltTilt = arc * 0.22;
         if (this.rightArmPart) {
-          this.rightArmPart.position.set(0.02 * arc, 0.04 * arc, 0.05 * arc);
+          this.rightArmPart.position.set(
+            m.rightHandPos[0] + 0.025 * arc,
+            m.rightHandPos[1] + 0.05 * arc,
+            m.rightHandPos[2] - 0.06 * arc
+          );
         }
       } else {
         this.boltPart.rotation.z = THREE.MathUtils.damp(this.boltPart.rotation.z, 0, 16, dt);
         this.boltPart.position.z = THREE.MathUtils.damp(this.boltPart.position.z, 0, 16, dt);
         if (this.rightArmPart) {
-          this.rightArmPart.position.x = THREE.MathUtils.damp(this.rightArmPart.position.x, 0, 14, dt);
-          this.rightArmPart.position.y = THREE.MathUtils.damp(this.rightArmPart.position.y, 0, 14, dt);
-          this.rightArmPart.position.z = THREE.MathUtils.damp(this.rightArmPart.position.z, 0, 14, dt);
+          this.rightArmPart.position.x = THREE.MathUtils.damp(this.rightArmPart.position.x, m.rightHandPos[0], 14, dt);
+          this.rightArmPart.position.y = THREE.MathUtils.damp(this.rightArmPart.position.y, m.rightHandPos[1], 14, dt);
+          this.rightArmPart.position.z = THREE.MathUtils.damp(this.rightArmPart.position.z, m.rightHandPos[2], 14, dt);
         }
       }
     } else if (this.rightArmPart) {
-      this.rightArmPart.position.x = THREE.MathUtils.damp(this.rightArmPart.position.x, 0, 14, dt);
-      this.rightArmPart.position.y = THREE.MathUtils.damp(this.rightArmPart.position.y, 0, 14, dt);
-      this.rightArmPart.position.z = THREE.MathUtils.damp(this.rightArmPart.position.z, 0, 14, dt);
+      this.rightArmPart.position.x = THREE.MathUtils.damp(this.rightArmPart.position.x, m.rightHandPos[0], 14, dt);
+      this.rightArmPart.position.y = THREE.MathUtils.damp(this.rightArmPart.position.y, m.rightHandPos[1], 14, dt);
+      this.rightArmPart.position.z = THREE.MathUtils.damp(this.rightArmPart.position.z, m.rightHandPos[2], 14, dt);
+      this.rightArmPart.rotation.x = THREE.MathUtils.damp(this.rightArmPart.rotation.x, m.rightHandRot[0], 14, dt);
+      this.rightArmPart.rotation.y = THREE.MathUtils.damp(this.rightArmPart.rotation.y, m.rightHandRot[1], 14, dt);
+      this.rightArmPart.rotation.z = THREE.MathUtils.damp(this.rightArmPart.rotation.z, m.rightHandRot[2], 14, dt);
+    }
+
+    // Weapon inspection choreography ([F] key)
+    let inspectX = 0;
+    let inspectY = 0;
+    let inspectZ = 0;
+    let inspectPitch = 0;
+    let inspectYaw = 0;
+    let inspectRoll = 0;
+    if (this.isInspecting) {
+      this.inspectTimer -= dt;
+      if (this.inspectTimer <= 0 || this.isReloading || this.zoomLevel > 0) {
+        this.isInspecting = false;
+        this.inspectTimer = 0;
+      } else {
+        const ip = 1 - this.inspectTimer / this.inspectDuration; // 0..1
+        const envelope = Math.sin(ip * Math.PI);
+        const turnSide = Math.sin(ip * Math.PI * 2); // Shows left side then tilts to right side
+        inspectX = -0.075 * envelope;
+        inspectY = 0.032 * envelope;
+        inspectZ = 0.055 * envelope;
+        inspectPitch = 0.14 * envelope;
+        inspectYaw = 0.62 * envelope + turnSide * 0.24;
+        inspectRoll = -0.44 * envelope + turnSide * 0.58;
+      }
     }
 
     // Muzzle flash visibility
     if (this.flashTimer > 0) {
       this.flashTimer -= dt;
-      this.muzzleFlashMesh.visible = true;
-      this.muzzleFlashMesh.position.set(0, 0.025, -0.58);
-      this.muzzleFlashMesh.rotation.z += dt * 45;
-      const s = 0.72 + Math.random() * 0.65;
-      this.muzzleFlashMesh.scale.setScalar(s);
+      this.muzzleFlashGroup.visible = true;
+      this.muzzleFlashGroup.rotation.z += dt * 45;
+      const s = 0.68 + Math.random() * 0.55;
+      this.muzzleFlashGroup.scale.setScalar(s);
     } else {
-      this.muzzleFlashMesh.visible = false;
+      this.muzzleFlashGroup.visible = false;
     }
 
     // Scope FOV interpolation
@@ -448,11 +543,9 @@ export class WeaponController {
       camera.updateProjectionMatrix();
     }
 
-    // Hide viewmodel when sniper scope overlay is active
     const isSniperScoped = this.zoomLevel > 0 && def.hasSecondZoom;
     this.viewRoot.visible = !isSniperScoped;
 
-    // Smooth walk/run/sprint bob + idle breath + weapon recoil + melee slash
     const bobFreq = isSprinting ? 11.2 : 8.0;
     const walkBobX = Math.cos(this.idleTime * bobFreq) * 0.011 * moveSpeedRatio;
     const walkBobY = Math.abs(Math.sin(this.idleTime * bobFreq)) * 0.013 * moveSpeedRatio;
@@ -466,14 +559,14 @@ export class WeaponController {
     const sprintRoll = -this.sprintBlend * 0.25;
 
     this.viewRoot.position.set(
-      this.swayX + walkBobX - (isCrouching ? 0.014 : 0) + sprintOffsetX - meleeArc * 0.09 - stabArc * 0.05,
-      this.swayY - walkBobY + idleBreath - this.switchAnim * 0.22 - reloadDip + sprintOffsetY - stabArc * 0.03,
-      this.kickAnim * 0.052 - meleeArc * 0.19 - stabArc * 0.28
+      this.swayX + walkBobX - (isCrouching ? 0.014 : 0) + sprintOffsetX - meleeArc * 0.09 - stabArc * 0.05 + inspectX,
+      this.swayY - walkBobY + idleBreath - this.switchAnim * 0.22 - reloadDip + sprintOffsetY - stabArc * 0.03 + inspectY,
+      this.kickAnim * 0.052 - meleeArc * 0.19 - stabArc * 0.28 + inspectZ
     );
     this.viewRoot.rotation.set(
-      this.kickAnim * 0.1 - meleeArc * 0.42 - stabArc * 0.55 - this.switchAnim * 0.35 + reloadPitch,
-      meleeArc * 0.55 + sprintYaw,
-      reloadRoll + sprintRoll + boltTilt - meleeArc * 0.45 + stabArc * 0.35
+      this.kickAnim * 0.1 - meleeArc * 0.42 - stabArc * 0.55 - this.switchAnim * 0.35 + reloadPitch + inspectPitch,
+      meleeArc * 0.55 + sprintYaw + inspectYaw,
+      reloadRoll + sprintRoll + boltTilt - meleeArc * 0.45 + stabArc * 0.35 + inspectRoll
     );
   }
 

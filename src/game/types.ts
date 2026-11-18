@@ -2,6 +2,7 @@ export type Team = 'T' | 'CT' | 'SPECTATOR';
 
 export type GameScreen =
   | 'MENU'
+  | 'MAP_SELECT'
   | 'MULTIPLAYER'
   | 'TEAM_SELECT'
   | 'CLASS_SELECT'
@@ -18,9 +19,13 @@ export type MapId =
   | 'de_nuke'
   | 'de_train'
   | 'de_aztec'
+  | 'de_dust'
+  | 'de_cbble'
+  | 'de_mirage'
   | 'cs_office'
   | 'cs_assault'
-  | 'cs_italy';
+  | 'cs_italy'
+  | 'cs_militia';
 
 export type CharacterClassId =
   | 'classic_t'
@@ -283,6 +288,7 @@ export interface GameSettings {
     use: string;
     buy: string;
     drop: string;
+    inspect: string;
     scoreboard: string;
   };
 }
@@ -291,10 +297,12 @@ export interface MapMeta {
   id: MapId;
   name: string;
   displayName: string;
-  modeTag: 'Bomb Defusal' | 'Hostage / Tactical';
+  modeTag: 'Bomb Defusal' | 'Hostage Rescue';
   environment: string;
   description: string;
   accentHex: string;
+  calloutsHighlight?: string[];
+  dimensions?: string;
 }
 
 export interface ServerListing {

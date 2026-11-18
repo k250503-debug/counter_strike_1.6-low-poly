@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import { Lock, ShoppingCart, X } from 'lucide-react';
 import { WEAPON_DATABASE } from '../game/WeaponDatabase';
 import { HudSnapshot, WeaponCategory, WeaponId } from '../game/types';
-import { CharacterPreviewCanvas } from './CharacterPreviewCanvas';
+import { CharacterPreviewCanvas } from './characters/CharacterPreviewCanvas';
 
 interface BuyMenuProps {
   hud: HudSnapshot;

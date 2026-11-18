@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { ArrowLeft, Check, Crosshair, MapPin, Play } from 'lucide-react';
 import { CHARACTER_CLASSES, MAPS_METADATA } from '../game/WeaponDatabase';
 import { BotDifficulty, CharacterClassId, GameMode, MapId, Team } from '../game/types';
-import { CharacterPreviewCanvas } from './CharacterPreviewCanvas';
+import { CharacterPreviewCanvas } from './characters/CharacterPreviewCanvas';
 
 interface ClassSelectionProps {
   team: Team;
@@ -10,6 +10,7 @@ interface ClassSelectionProps {
   selectedMode: GameMode;
   botDifficulty: BotDifficulty;
   onBack: () => void;
+  onOpenMapSelect: () => void;
   onDeploy: (config: {
     classId: CharacterClassId;
     mapId: MapId;
@@ -34,6 +35,7 @@ export function ClassSelection({
   selectedMode,
   botDifficulty,
   onBack,
+  onOpenMapSelect,
   onDeploy,
 }: ClassSelectionProps) {
   const effectiveTeam: 'T' | 'CT' = team === 'T' ? 'T' : 'CT';
@@ -119,7 +121,7 @@ export function ClassSelection({
           </div>
 
           <div className="flex-1 my-2 bg-gradient-to-b from-white/[0.03] to-black/35 border border-white/10 overflow-hidden min-h-[260px]">
-            <CharacterPreviewCanvas mode="character" classId={classId} />
+            <CharacterPreviewCanvas mode="character" classId={classId} showStanceControls />
           </div>
 
           <div className="text-xs text-white/70 flex items-center justify-between pt-2 border-t border-white/10">
@@ -132,17 +134,26 @@ export function ClassSelection({
 
         {/* Right: Map & Game Mode Picker */}
         <div className="lg:col-span-4 cs-panel p-4 flex flex-col gap-3">
-          <h3 className="font-display text-lg uppercase tracking-wider text-white/80 border-b border-white/15 pb-2 flex items-center gap-2">
-            <MapPin className="w-4 h-4 text-[#f5b841]" />
-            2. Map & Game Mode
-          </h3>
+          <div className="flex items-center justify-between border-b border-white/15 pb-2">
+            <h3 className="font-display text-lg uppercase tracking-wider text-white/80 flex items-center gap-2">
+              <MapPin className="w-4 h-4 text-[#f5b841]" />
+              2. Map &amp; Game Mode
+            </h3>
+            <button
+              type="button"
+              onClick={onOpenMapSelect}
+              className="px-2.5 py-1 bg-white/[0.06] hover:bg-white/15 border border-white/20 text-[11px] uppercase tracking-wider text-[#f5b841] cursor-pointer whitespace-nowrap"
+            >
+              3D Map Browser
+            </button>
+          </div>
 
-          <div className="grid grid-cols-2 gap-1.5">
+          <div className="grid grid-cols-2 gap-1.5 max-h-[168px] overflow-y-auto pr-1">
             {MAPS_METADATA.map((m) => (
               <button
                 key={m.id}
                 onClick={() => setMapId(m.id)}
-                className={`px-3 py-2 text-left border transition-all cursor-pointer ${
+                className={`px-3 py-1.5 text-left border transition-all cursor-pointer ${
                   mapId === m.id
                     ? 'bg-white/15 border-[#f5b841]'
                     : 'bg-white/[0.03] border-white/15 hover:bg-white/[0.08]'

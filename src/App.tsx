@@ -3,6 +3,7 @@ import { BuyMenu } from './components/BuyMenu';
 import { ClassSelection } from './components/ClassSelection';
 import { HUD } from './components/HUD';
 import { MainMenu } from './components/MainMenu';
+import { MapSelection } from './components/MapSelection';
 import { AboutModal, ControlsModal, MultiplayerModal, SettingsModal } from './components/Modals';
 import { PauseMenu } from './components/PauseMenu';
 import { TeamSelection } from './components/TeamSelection';
@@ -133,7 +134,7 @@ export default function App() {
           activeMenuMap={activeMenuMap}
           onSelectMenuMap={(id) => engineRef.current?.setMenuShowcaseMap(id)}
           onCycleMenuMap={(delta) => engineRef.current?.cycleMenuShowcaseMap(delta)}
-          onPlay={() => setScreen('TEAM_SELECT')}
+          onPlay={() => setScreen('MAP_SELECT')}
           onMultiplayer={() => setModal('MULTIPLAYER')}
           onSettings={() => setModal('SETTINGS')}
           onControls={() => setModal('CONTROLS')}
@@ -145,6 +146,23 @@ export default function App() {
         />
       )}
 
+      {/* MAP SELECTION */}
+      {screen === 'MAP_SELECT' && (
+        <MapSelection
+          selectedMap={selectedMap}
+          selectedMode={selectedMode}
+          botDifficulty={botDifficulty}
+          onBack={() => setScreen('MENU')}
+          onConfirm={(cfg) => {
+            setSelectedMap(cfg.mapId);
+            setSelectedMode(cfg.mode);
+            setBotDifficulty(cfg.botDifficulty);
+            settingsManager.update({ botDifficulty: cfg.botDifficulty });
+            setScreen('TEAM_SELECT');
+          }}
+        />
+      )}
+
       {/* TEAM SELECTION */}
       {screen === 'TEAM_SELECT' && (
         <TeamSelection
@@ -152,7 +170,7 @@ export default function App() {
             setSelectedTeam(team);
             setScreen('CLASS_SELECT');
           }}
-          onBack={() => setScreen('MENU')}
+          onBack={() => setScreen('MAP_SELECT')}
         />
       )}
 
@@ -164,6 +182,7 @@ export default function App() {
           selectedMode={selectedMode}
           botDifficulty={botDifficulty}
           onBack={() => setScreen('TEAM_SELECT')}
+          onOpenMapSelect={() => setScreen('MAP_SELECT')}
           onDeploy={handleDeploy}
         />
       )}

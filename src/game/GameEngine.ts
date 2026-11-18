@@ -1,5 +1,4 @@
 import * as THREE from 'three';
-import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 import { audioManager } from './AudioManager';
 import {
   BotContext,
@@ -11,8 +10,10 @@ import {
   updateBotAI,
 } from './BotAI';
 import { animateCharacterPose, buildCharacterRig, CharacterRig } from './CharacterModels';
+import { ParticleEffects } from './effects/ParticleEffects';
 import { HealthSystem } from './HealthSystem';
 import { InventorySystem } from './InventorySystem';
+import { CinematicLightingSystem } from './lighting/CinematicLightingSystem';
 import { BuiltMap, mapManager } from './MapManager';
 import { PlayerController } from './PlayerController';
 import { textures } from './ProceduralTextures';
@@ -20,7 +21,7 @@ import { RoundManager } from './RoundManager';
 import { settingsManager } from './SettingsManager';
 import { WeaponController } from './WeaponController';
 import { WEAPON_DATABASE } from './WeaponDatabase';
-import { buildWeaponModel } from './WeaponModels';
+import { buildWeaponModel, SHARED_WEAPON_MATERIALS } from './WeaponModels';
 import {
   CharacterClassId,
   GameMode,
@@ -57,11 +58,6 @@ interface ThrownGrenade {
   ownerTeam: 'T' | 'CT';
 }
 
-interface SmokeCloud {
-  group: THREE.Group;
-  life: number;
-}
-
 interface DroppedWeapon {
   id: string;
   weaponId: WeaponId;
@@ -90,9 +86,13 @@ const MENU_SHOWCASE_ORDER: MapId[] = [
   'de_nuke',
   'de_train',
   'de_aztec',
+  'de_dust',
+  'de_cbble',
+  'de_mirage',
   'cs_office',
   'cs_assault',
   'cs_italy',
+  'cs_militia',
 ];
 
 export class GameEngine {
@@ -139,6 +139,9 @@ export class GameEngine {
   private playerKills = 0;
   private playerDeaths = 0;
   private playerRespawnTimer = 0;
+  private multiKillCount = 0;
+  private multiKillTimer = 0;
+  private roundFirstBloodClaimed = false;
 
   private bots: BotContext[] = [];
   private tracers: TracerEffect[] = [];
@@ -154,11 +157,9 @@ export class GameEngine {
   private bloodPoolMat: THREE.MeshStandardMaterial | null = null;
   private bloodDropGeo = new THREE.SphereGeometry(0.036, 5, 4);
   private bloodDropMats: THREE.MeshBasicMaterial[] = [];
-  private sparkGeo = new THREE.BoxGeometry(0.08, 0.08, 0.08);
-  private sparkMats = new Map<number, THREE.MeshBasicMaterial>();
-  private smokeGeo = new THREE.DodecahedronGeometry(1.6, 1);
+  private particleEffects: ParticleEffects;
+  private lightingSystem: CinematicLightingSystem;
   private thrownGrenades: ThrownGrenade[] = [];
-  private smokeClouds: SmokeCloud[] = [];
   private droppedWeapons: DroppedWeapon[] = [];
   private plantedC4Mesh: THREE.Group | null = null;
   private plantedC4Pos: THREE.Vector3 | null = null;
@@ -212,14 +213,14 @@ export class GameEngine {
   private readonly _rayDir = new THREE.Vector3();
   private readonly _eyePos = new THREE.Vector3();
   private readonly _tmpMuzzle = new THREE.Vector3();
+  private readonly _tmpEject = new THREE.Vector3();
+  private readonly _tmpRight = new THREE.Vector3();
+  private readonly _tmpUp = new THREE.Vector3();
   private readonly _tmpTarget = new THREE.Vector3();
   private readonly _camUp = new THREE.Vector3(0, 1, 0);
   private readonly _tmpToBot = new THREE.Vector3();
   private readonly _tmpFwd = new THREE.Vector3();
   private readonly _tmpThrowDir = new THREE.Vector3();
-
-  private dirLight: THREE.DirectionalLight;
-  private hemiLight: THREE.HemisphereLight;
 
   constructor(
     container: HTMLElement,
@@ -276,7 +277,7 @@ export class GameEngine {
       settingsManager.get().fov,
       (container.clientWidth || window.innerWidth) / (container.clientHeight || window.innerHeight),
       0.08,
-      360
+      520
     );
     this.scene.add(this.camera);
 
@@ -285,38 +286,18 @@ export class GameEngine {
     this.camera.add(this.playerMuzzleLight);
     this.scene.add(this.menuMuzzleLight);
 
-    // Mandatory studio environment map via RoomEnvironment
-    const pmrem = new THREE.PMREMGenerator(this.renderer);
-    this.scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
-    pmrem.dispose();
-
-    // 3-Point / Outdoor lighting rig
-    this.hemiLight = new THREE.HemisphereLight(0x9ec5e6, 0x8a7052, 0.72);
-    this.scene.add(this.hemiLight);
-
-    this.dirLight = new THREE.DirectionalLight(0xffe6bd, 1.85);
-    this.dirLight.position.set(40, 62, 28);
-    this.dirLight.castShadow = !this.isSoftwareGl;
-    this.dirLight.shadow.mapSize.set(2048, 2048);
-    this.dirLight.shadow.camera.near = 1;
-    this.dirLight.shadow.camera.far = 160;
-    const d = 48;
-    this.dirLight.shadow.camera.left = -d;
-    this.dirLight.shadow.camera.right = d;
-    this.dirLight.shadow.camera.top = d;
-    this.dirLight.shadow.camera.bottom = -d;
-    this.dirLight.shadow.bias = -0.0005;
-    this.dirLight.shadow.normalBias = 0.02;
-    this.scene.add(this.dirLight);
-
-    // Rim backlight
-    const rimLight = new THREE.DirectionalLight(0x88b8e6, 0.42);
-    rimLight.position.set(-40, 30, -45);
-    this.scene.add(rimLight);
-
     // Attach first-person weapon view to camera
     this.camera.add(this.weaponController.viewRoot);
     this.weaponController.viewRoot.visible = false;
+
+    this.particleEffects = new ParticleEffects(this.scene);
+    this.lightingSystem = new CinematicLightingSystem(
+      this.renderer,
+      this.scene,
+      this.camera,
+      this.container,
+      this.isSoftwareGl
+    );
 
     this.bindEvents();
     this.startMenuBattleScene();
@@ -356,6 +337,7 @@ export class GameEngine {
     document.removeEventListener('pointerlockchange', this.onPointerLockChange);
     audioManager.stopAmbientWind();
     audioManager.stopMenuMusic();
+    audioManager.stopAllVoices();
     this.clearMatchEntities();
     this.scene.remove(this.menuGroup);
     this.disposeObject3D(this.menuGroup);
@@ -371,7 +353,6 @@ export class GameEngine {
       (this.ambientParticles.material as THREE.Material).dispose();
       this.ambientParticles = null;
     }
-    this.scene.environment?.dispose();
     this.bulletDecalGeo.dispose();
     this.bulletDecalMat?.dispose();
     this.bloodSplatterGeo.dispose();
@@ -382,10 +363,8 @@ export class GameEngine {
     this.bloodDropGeo.dispose();
     this.bloodDropMats.forEach((m) => m.dispose());
     this.bloodDropMats = [];
-    this.sparkGeo.dispose();
-    this.sparkMats.forEach((mat) => mat.dispose());
-    this.sparkMats.clear();
-    this.smokeGeo.dispose();
+    this.particleEffects.dispose();
+    this.lightingSystem.dispose();
     this.renderer.dispose();
     if (this.renderer.domElement.parentElement === this.container) {
       this.container.removeChild(this.renderer.domElement);
@@ -394,7 +373,7 @@ export class GameEngine {
 
   /**
    * Disposes geometries and materials on dynamic scene subtrees while preserving
-   * globally cached textures owned by ProceduralTextures.
+   * globally cached textures and shared weapon PBR materials.
    */
   private disposeObject3D(root: THREE.Object3D): void {
     root.traverse((obj) => {
@@ -404,18 +383,18 @@ export class GameEngine {
         mesh.geometry !== this.bulletDecalGeo &&
         mesh.geometry !== this.bloodSplatterGeo &&
         mesh.geometry !== this.bloodPoolGeo &&
-        mesh.geometry !== this.bloodDropGeo &&
-        mesh.geometry !== this.sparkGeo &&
-        mesh.geometry !== this.smokeGeo
+        mesh.geometry !== this.bloodDropGeo
       ) {
         mesh.geometry.dispose();
       }
       const mat = (obj as { material?: THREE.Material | THREE.Material[] }).material;
       if (Array.isArray(mat)) {
         for (const m of mat) {
-          if (m !== this.bulletDecalMat && m !== this.bloodPoolMat) m.dispose();
+          if (m !== this.bulletDecalMat && m !== this.bloodPoolMat && !SHARED_WEAPON_MATERIALS.has(m)) {
+            m.dispose();
+          }
         }
-      } else if (mat && mat !== this.bulletDecalMat && mat !== this.bloodPoolMat) {
+      } else if (mat && mat !== this.bulletDecalMat && mat !== this.bloodPoolMat && !SHARED_WEAPON_MATERIALS.has(mat)) {
         mat.dispose();
       }
     });
@@ -426,11 +405,11 @@ export class GameEngine {
     this.renderer.setPixelRatio(
       this.isSoftwareGl ? 1 : Math.min(window.devicePixelRatio, 2) * s.resolutionScale
     );
-    this.renderer.shadowMap.enabled = !this.isSoftwareGl && s.graphicsQuality !== 'low';
     if (this.weaponController.zoomLevel === 0) {
       this.camera.fov = s.fov;
       this.camera.updateProjectionMatrix();
     }
+    this.lightingSystem.applySettings();
   }
 
   public setUiOverlayState(buyOpen: boolean, paused: boolean): void {
@@ -470,6 +449,7 @@ export class GameEngine {
   public startMenuBattleScene(mapId?: MapId): void {
     this.engineMode = 'MENU_BATTLE';
     audioManager.stopAmbientWind();
+    audioManager.stopAllVoices();
     this.weaponController.viewRoot.visible = false;
     this.playerMuzzleLight.intensity = 0;
     this.clearMatchEntities();
@@ -677,14 +657,20 @@ export class GameEngine {
   }
 
   private applyMapAtmosphere(map: BuiltMap): void {
-    this.scene.background = new THREE.Color(map.skyColor);
-    this.scene.fog = new THREE.FogExp2(map.fogColor, map.fogDensity);
-    this.dirLight.color.setHex(map.sunColor);
-    this.dirLight.intensity = map.sunIntensity;
-    this.dirLight.position.copy(map.sunPos);
-    this.hemiLight.color.setHex(map.hemiSky);
-    this.hemiLight.groundColor.setHex(map.hemiGround);
-    this.hemiLight.intensity = map.hemiIntensity;
+    this.lightingSystem.applyMapAtmosphere(map);
+  }
+
+  private getFloorYAt(x: number, z: number, curY: number): number {
+    if (!this.currentMap) return 0;
+    let bestY = 0;
+    const cols = this.currentMap.colliders;
+    for (let i = 0; i < cols.length; i++) {
+      const c = cols[i];
+      if (x >= c.minX && x <= c.maxX && z >= c.minZ && z <= c.maxZ && c.maxY <= curY + 0.45) {
+        if (c.maxY > bestY) bestY = c.maxY;
+      }
+    }
+    return bestY;
   }
 
   private clearMatchEntities(): void {
@@ -712,11 +698,7 @@ export class GameEngine {
       this.disposeObject3D(g.mesh);
     });
     this.thrownGrenades = [];
-    this.smokeClouds.forEach((s) => {
-      this.scene.remove(s.group);
-      this.disposeObject3D(s.group);
-    });
-    this.smokeClouds = [];
+    this.particleEffects.clear();
     this.droppedWeapons.forEach((d) => {
       this.scene.remove(d.mesh);
       this.disposeObject3D(d.mesh);
@@ -745,11 +727,7 @@ export class GameEngine {
       this.disposeObject3D(g.mesh);
     });
     this.thrownGrenades = [];
-    this.smokeClouds.forEach((s) => {
-      this.scene.remove(s.group);
-      this.disposeObject3D(s.group);
-    });
-    this.smokeClouds = [];
+    this.particleEffects.clear();
     this.droppedWeapons.forEach((d) => {
       this.scene.remove(d.mesh);
       this.disposeObject3D(d.mesh);
@@ -765,6 +743,9 @@ export class GameEngine {
     this.lastRadioSpotTime = 0;
     this.currentTargetId = null;
     this.weaponSelectTimer = 2.2;
+    this.multiKillCount = 0;
+    this.multiKillTimer = 0;
+    this.roundFirstBloodClaimed = false;
 
     // Player spawn
     const spawns = this.playerTeam === 'T' ? this.currentMap.tSpawns : this.currentMap.ctSpawns;
@@ -853,6 +834,9 @@ export class GameEngine {
       this.playerTeam,
       firstRound ? 'Lock and load. Go! Go! Go!' : 'Okay, let\'s move out!'
     );
+    if (this.roundManager.phase !== 'FREEZETIME') {
+      audioManager.playVoiceLine(firstRound ? 'lock_and_load' : 'go');
+    }
   }
 
   private tick = (): void => {
@@ -876,7 +860,7 @@ export class GameEngine {
       this.updateMatch(dt, now / 1000);
     }
 
-    this.renderer.render(this.scene, this.camera);
+    this.lightingSystem.render(dt, this.weaponController.zoomLevel);
 
     if (this.isSoftwareGl) {
       this.afterDraw(this.tick);
@@ -920,6 +904,7 @@ export class GameEngine {
     this.camera.position.y = sc.camHeight + Math.cos(elapsed * 0.24) * 0.38;
     this.camera.position.z = sc.camCenter.z + Math.cos(angle * 0.85) * sc.camOrbitRadius * 0.34;
     this.camera.lookAt(sc.lookAt);
+    this.lightingSystem.update(elapsed, sc.lookAt.x, sc.lookAt.y, sc.lookAt.z, null, 0);
 
     if (this.menuMuzzleTimer > 0) {
       this.menuMuzzleTimer -= dt;
@@ -991,7 +976,7 @@ export class GameEngine {
       }
     }
 
-    // Periodic background explosion spark burst near landmark
+    // Periodic background explosion burst near landmark
     this.menuExplosionTimer -= dt;
     if (this.menuExplosionTimer <= 0) {
       this.menuExplosionTimer = 5.0 + Math.random() * 3.0;
@@ -999,11 +984,11 @@ export class GameEngine {
         .clone()
         .add(new THREE.Vector3((Math.random() - 0.5) * 7, -0.9, (Math.random() - 0.5) * 7));
       expPos.y = Math.max(0.25, expPos.y);
-      this.spawnImpactSparks(expPos, 14, 0xff9238);
+      this.particleEffects.spawnExplosion(expPos, 0.72, true);
     }
 
     this.updateAmbientParticles(dt, elapsed);
-    this.updateEffects(dt);
+    this.updateEffects(dt, elapsed);
   }
 
   private updateMatch(dt: number, elapsed: number): void {
@@ -1013,6 +998,12 @@ export class GameEngine {
     this.damageIndicatorTimer = Math.max(0, this.damageIndicatorTimer - dt);
     this.weaponSelectTimer = Math.max(0, this.weaponSelectTimer - dt);
     this.flashAlpha = Math.max(0, this.flashAlpha - dt * 0.45);
+    if (this.multiKillTimer > 0) {
+      this.multiKillTimer = Math.max(0, this.multiKillTimer - dt);
+      if (this.multiKillTimer === 0) {
+        this.multiKillCount = 0;
+      }
+    }
     const nowMs = performance.now();
     if (this.radioLog.length > 0) {
       this.radioLog = this.radioLog.filter((r) => nowMs - r.timestamp < 8500);
@@ -1034,6 +1025,14 @@ export class GameEngine {
     }
 
     this.updateAmbientParticles(dt, elapsed);
+    this.lightingSystem.update(
+      elapsed,
+      this.camera.position.x,
+      Math.max(0, this.camera.position.y - 1.5),
+      this.camera.position.z,
+      this.plantedC4Pos,
+      this.roundManager.bombTimer
+    );
 
     const activeWeapon = this.inventory.getActiveWeapon();
     const def = WEAPON_DATABASE[activeWeapon.id];
@@ -1183,12 +1182,12 @@ export class GameEngine {
     this.updateDroppedWeapons(dt);
     this.updateTargetIdentification();
     this.updateGrenades(dt);
-    this.updateEffects(dt);
+    this.updateEffects(dt, elapsed);
 
     // Check if player is inside a smoke cloud
     let inSmoke = 0;
-    for (const sc of this.smokeClouds) {
-      const dist = sc.group.position.distanceTo(this.camera.position);
+    for (const sc of this.particleEffects.smokeClouds) {
+      const dist = sc.pos.distanceTo(this.camera.position);
       if (dist < 4.5) {
         inSmoke = Math.max(inSmoke, (1 - dist / 4.5) * 0.85);
       }
@@ -1294,11 +1293,12 @@ export class GameEngine {
     const center = this.plantedC4Pos.clone();
     if (this.plantedC4Mesh) {
       this.scene.remove(this.plantedC4Mesh);
+      this.disposeObject3D(this.plantedC4Mesh);
       this.plantedC4Mesh = null;
     }
     this.plantedC4Pos = null;
     audioManager.playExplosion(1.0);
-    this.spawnImpactSparks(center, 30, 0xff7722);
+    this.particleEffects.spawnExplosion(center, 1.85, true);
 
     // Damage nearby combatants
     const pDist = this.playerController.position.distanceTo(center);
@@ -1386,6 +1386,23 @@ export class GameEngine {
       if (!inst.silenced) {
         this.playerMuzzleTimer = 0.045;
         this.playerMuzzleLight.intensity = 3.4;
+        if (this.weaponController.zoomLevel === 0) {
+          this.weaponController.getMuzzleWorldPosition(this._tmpMuzzle);
+          this.particleEffects.spawnMuzzleWisp(this._tmpMuzzle);
+        }
+      }
+      if (this.weaponController.zoomLevel === 0) {
+        this.weaponController.getEjectionWorldPosition(this._tmpEject);
+        this.camera.getWorldDirection(this._tmpFwd);
+        this._tmpRight.crossVectors(this._tmpFwd, this._camUp).normalize();
+        this._tmpUp.crossVectors(this._tmpRight, this._tmpFwd).normalize();
+        this.particleEffects.spawnShellCasing(
+          this._tmpEject,
+          this._tmpRight,
+          this._tmpUp,
+          this._tmpFwd,
+          this.playerController.position.y
+        );
       }
     }
 
@@ -1422,7 +1439,11 @@ export class GameEngine {
       const wallDist = wallHits.length > 0 ? wallHits[0].distance : def.range;
 
       const enemyHits = this._raycaster.intersectObjects(botHitMeshes, false);
-      this._tmpMuzzle.set(0.14, -0.1, 0).applyQuaternion(this.camera.quaternion).add(this._eyePos);
+      if (def.slot !== 'knife' && this.weaponController.zoomLevel === 0) {
+        this.weaponController.getMuzzleWorldPosition(this._tmpMuzzle);
+      } else {
+        this._tmpMuzzle.set(0.14, -0.1, 0).applyQuaternion(this.camera.quaternion).add(this._eyePos);
+      }
 
       // Check CS 1.6 thin-cover wallbang penetration for high-caliber weapons
       let wallbangHit: THREE.Intersection | null = null;
@@ -1498,6 +1519,7 @@ export class GameEngine {
               if (this.playerTeam === 'T') this.roundManager.tScore += 1;
               else this.roundManager.ctScore += 1;
             }
+            this.recordPlayerKill(isHead);
           }
         }
         if (def.slot !== 'knife') {
@@ -1566,6 +1588,7 @@ export class GameEngine {
             if (this.playerTeam === 'T') this.roundManager.tScore += 1;
             else this.roundManager.ctScore += 1;
           }
+          this.recordPlayerKill(isHead);
         }
       }
     } else if (wallHits.length > 0) {
@@ -1763,8 +1786,9 @@ export class GameEngine {
       const dw = this.droppedWeapons[i];
       if (dw.pickupCooldown > 0) dw.pickupCooldown = Math.max(0, dw.pickupCooldown - dt);
 
+      const floorY = this.getFloorYAt(dw.pos.x, dw.pos.z, dw.pos.y) + 0.08;
       if (
-        dw.pos.y > 0.08 ||
+        dw.pos.y > floorY ||
         Math.abs(dw.vel.y) > 0.04 ||
         Math.abs(dw.vel.x) > 0.04 ||
         Math.abs(dw.vel.z) > 0.04
@@ -1772,8 +1796,8 @@ export class GameEngine {
         dw.vel.y -= 18 * dt;
         dw.pos.addScaledVector(dw.vel, dt);
 
-        if (dw.pos.y <= 0.08) {
-          dw.pos.y = 0.08;
+        if (dw.pos.y <= floorY) {
+          dw.pos.y = floorY;
           dw.vel.y = Math.abs(dw.vel.y) > 1.2 ? Math.abs(dw.vel.y) * 0.25 : 0;
           dw.vel.x *= 0.55;
           dw.vel.z *= 0.55;
@@ -1781,7 +1805,7 @@ export class GameEngine {
 
         for (const c of this.currentMap.colliders) {
           if (
-            dw.pos.y > c.minY &&
+            dw.pos.y > c.minY + 0.14 &&
             dw.pos.y < c.maxY &&
             dw.pos.x > c.minX - 0.2 &&
             dw.pos.x < c.maxX + 0.2 &&
@@ -1890,6 +1914,7 @@ export class GameEngine {
       if (!isFriend && now - this.lastRadioSpotTime > 7000) {
         this.lastRadioSpotTime = now;
         this.pushRadioMessage('You', this.playerTeam, 'Enemy spotted.');
+        audioManager.playVoiceLine('enemy_spotted');
       }
     } else {
       this.currentTargetId = null;
@@ -1915,6 +1940,35 @@ export class GameEngine {
       timestamp: performance.now(),
     });
     if (this.killFeed.length > 5) this.killFeed.pop();
+    if (killerName !== 'Gravity' && killerName !== 'You') {
+      this.roundFirstBloodClaimed = true;
+    }
+  }
+
+  private recordPlayerKill(isHeadshot: boolean): void {
+    const isFirstBlood = !this.roundFirstBloodClaimed;
+    this.roundFirstBloodClaimed = true;
+
+    this.multiKillCount = this.multiKillTimer > 0 ? this.multiKillCount + 1 : 1;
+    this.multiKillTimer = 4.5;
+
+    if (this.multiKillCount >= 5) {
+      audioManager.playVoiceLine('monster_kill');
+      this.pushRadioMessage('Announcer', this.playerTeam, 'MONSTER KILL!');
+    } else if (this.multiKillCount === 4) {
+      audioManager.playVoiceLine('mega_kill');
+      this.pushRadioMessage('Announcer', this.playerTeam, 'MEGA KILL!');
+    } else if (this.multiKillCount === 3) {
+      audioManager.playVoiceLine('multi_kill');
+      this.pushRadioMessage('Announcer', this.playerTeam, 'MULTI KILL!');
+    } else if (this.multiKillCount === 2) {
+      audioManager.playVoiceLine('double_kill');
+      this.pushRadioMessage('Announcer', this.playerTeam, 'DOUBLE KILL!');
+    } else if (isHeadshot) {
+      audioManager.playVoiceLine('headshot');
+    } else if (isFirstBlood) {
+      audioManager.playVoiceLine('first_blood');
+    }
   }
 
   private throwGrenade(type: 'hegrenade' | 'flashbang' | 'smokegrenade'): void {
@@ -1927,6 +1981,7 @@ export class GameEngine {
     if (type === 'smokegrenade') this.inventory.grenades.smoke -= 1;
 
     this.pushRadioMessage('You', this.playerTeam, 'Fire in the hole!');
+    audioManager.playVoiceLine('fire_in_hole');
 
     const mesh = buildWeaponModel(type);
     mesh.scale.setScalar(1.3);
@@ -1966,17 +2021,18 @@ export class GameEngine {
       g.vel.y -= 18 * dt;
       g.pos.addScaledVector(g.vel, dt);
 
-      if (g.pos.y <= 0.08) {
-        g.pos.y = 0.08;
+      const floorY = this.getFloorYAt(g.pos.x, g.pos.z, g.pos.y) + 0.08;
+      if (g.pos.y <= floorY) {
+        g.pos.y = floorY;
         g.vel.y = Math.abs(g.vel.y) * 0.45;
         g.vel.x *= 0.72;
         g.vel.z *= 0.72;
       }
 
-      // Simple bounce against walls
+      // Bounce against walls / elevated structures above current floor slab
       for (const c of this.currentMap.colliders) {
         if (
-          g.pos.y > c.minY &&
+          g.pos.y > c.minY + 0.14 &&
           g.pos.y < c.maxY &&
           g.pos.x > c.minX - 0.15 &&
           g.pos.x < c.maxX + 0.15 &&
@@ -1997,6 +2053,7 @@ export class GameEngine {
       if (g.fuse <= 0) {
         this.detonateGrenade(g);
         this.scene.remove(g.mesh);
+        this.disposeObject3D(g.mesh);
         this.thrownGrenades.splice(i, 1);
       }
     }
@@ -2006,7 +2063,7 @@ export class GameEngine {
     const distToPlayer = g.pos.distanceTo(this.playerController.position);
     if (g.type === 'hegrenade') {
       audioManager.playExplosion(Math.max(0.15, 1 - distToPlayer / 45));
-      this.spawnImpactSparks(g.pos, 22, 0xff8533);
+      this.particleEffects.spawnExplosion(g.pos, 1.0, true);
 
       // Area damage
       if (this.playerHealth.alive && distToPlayer < 8.5) {
@@ -2035,15 +2092,22 @@ export class GameEngine {
             this.spawnBotDroppedWeapon(b);
             b.deaths += 1;
             b.respawnTimer = 3.0;
-            this.playerKills += 1;
-            this.inventory.addMoney(300);
             this.handleElimination(g.ownerName, g.ownerTeam, b.name, b.team, 'HE Grenade', false);
+            if (g.ownerName === 'You') {
+              this.playerKills += 1;
+              this.inventory.addMoney(300);
+              if (this.roundManager.mode === 'tdm') {
+                if (this.playerTeam === 'T') this.roundManager.tScore += 1;
+                else this.roundManager.ctScore += 1;
+              }
+              this.recordPlayerKill(false);
+            }
           }
         }
       });
     } else if (g.type === 'flashbang') {
       audioManager.playFlashbang();
-      this.spawnImpactSparks(g.pos, 12, 0xffffff);
+      this.particleEffects.spawnFlashPop(g.pos);
       if (distToPlayer < 22) {
         this.flashAlpha = Math.min(1, 1.15 - distToPlayer / 22);
       }
@@ -2054,28 +2118,7 @@ export class GameEngine {
   }
 
   private spawnSmokeCloud(pos: THREE.Vector3, life: number): void {
-    const group = new THREE.Group();
-    group.position.copy(pos);
-    const mat = new THREE.MeshStandardMaterial({
-      color: 0xc2c7cc,
-      roughness: 0.95,
-      metalness: 0,
-      transparent: true,
-      opacity: 0.72,
-      depthWrite: false,
-    });
-    for (let i = 0; i < 9; i++) {
-      const puff = new THREE.Mesh(this.smokeGeo, mat);
-      puff.scale.setScalar(0.92 + Math.random() * 0.68);
-      puff.position.set(
-        (Math.random() - 0.5) * 3.2,
-        0.9 + Math.random() * 1.8,
-        (Math.random() - 0.5) * 3.2
-      );
-      group.add(puff);
-    }
-    this.scene.add(group);
-    this.smokeClouds.push({ group, life });
+    this.particleEffects.spawnSmokeCloud(pos, life);
   }
 
   private spawnTracer(start: THREE.Vector3, end: THREE.Vector3, colorHex: number): void {
@@ -2112,6 +2155,7 @@ export class GameEngine {
     decal.position.copy(point).addScaledVector(worldNormal, 0.014);
     decal.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), worldNormal);
     decal.rotateZ(Math.random() * Math.PI * 2);
+    decal.userData.excludeFromAO = true;
     this.scene.add(decal);
     this.bulletDecals.push(decal);
     if (this.bulletDecals.length > 48) {
@@ -2121,29 +2165,10 @@ export class GameEngine {
   }
 
   private spawnImpactSparks(pos: THREE.Vector3, count: number, colorHex = 0xffc864): void {
-    let mat = this.sparkMats.get(colorHex);
-    if (!mat) {
-      mat = new THREE.MeshBasicMaterial({ color: colorHex });
-      this.sparkMats.set(colorHex, mat);
-    }
-    for (let i = 0; i < count; i++) {
-      const mesh = new THREE.Mesh(this.sparkGeo, mat);
-      mesh.position.copy(pos);
-      this.scene.add(mesh);
-      this.particles.push({
-        mesh,
-        vel: new THREE.Vector3(
-          (Math.random() - 0.5) * 6,
-          Math.random() * 5 + 1,
-          (Math.random() - 0.5) * 6
-        ),
-        life: 0.35 + Math.random() * 0.25,
-        maxLife: 0.55,
-      });
-    }
+    this.particleEffects.spawnSparks(pos, count, colorHex);
   }
 
-  private updateEffects(dt: number): void {
+  private updateEffects(dt: number, elapsed = 0): void {
     for (let i = this.tracers.length - 1; i >= 0; i--) {
       const t = this.tracers[i];
       t.life -= dt;
@@ -2176,16 +2201,7 @@ export class GameEngine {
       bp.mesh.scale.setScalar(growth);
     }
 
-    for (let i = this.smokeClouds.length - 1; i >= 0; i--) {
-      const s = this.smokeClouds[i];
-      s.life -= dt;
-      s.group.rotation.y += dt * 0.12;
-      if (s.life <= 0) {
-        this.scene.remove(s.group);
-        this.disposeObject3D(s.group);
-        this.smokeClouds.splice(i, 1);
-      }
-    }
+    this.particleEffects.update(dt, elapsed);
   }
 
   private spawnBloodBurst(pos: THREE.Vector3, shotDir: THREE.Vector3, count: number, isHeadshot: boolean): void {
@@ -2251,6 +2267,7 @@ export class GameEngine {
     decal.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), worldNormal);
     decal.rotateZ(Math.random() * Math.PI * 2);
     decal.scale.setScalar(0.75 + Math.random() * 0.65);
+    decal.userData.excludeFromAO = true;
     this.scene.add(decal);
     this.bloodDecals.push(decal);
     if (this.bloodDecals.length > 32) {
@@ -2277,6 +2294,7 @@ export class GameEngine {
     pool.rotation.z = Math.random() * Math.PI * 2;
     pool.position.set(pos.x, pos.y + 0.016, pos.z);
     pool.scale.setScalar(0.18);
+    pool.userData.excludeFromAO = true;
     this.scene.add(pool);
     this.bloodPools.push({ mesh: pool, age: 0 });
     if (this.bloodPools.length > 24) {
@@ -2721,6 +2739,7 @@ export class GameEngine {
     this.camera.aspect = w / h;
     this.camera.updateProjectionMatrix();
     this.renderer.setSize(w, h);
+    this.lightingSystem.resize(w, h);
   };
 
   private onPointerLockChange = (): void => {
@@ -2757,6 +2776,8 @@ export class GameEngine {
     if (e.code === kb.reload) {
       this.weaponController.startReload(this.inventory.getActiveWeapon());
       this.emitHudSnapshot();
+    } else if (e.code === kb.inspect) {
+      this.weaponController.startInspect();
     } else if (e.code === 'KeyQ') {
       if (this.inventory.quickSwitch()) {
         this.weaponSelectTimer = 2.2;
@@ -2895,7 +2916,7 @@ export class GameEngine {
     if (this.engineMode !== 'MATCH' || this.buyMenuOpen || this.pauseMenuOpen) return;
     if (!this.playerHealth.alive || this.isSpectatorMode) {
       if (this.spectatorMode === 'UPPER_OVERVIEW') {
-        this.overviewHeight = THREE.MathUtils.clamp(this.overviewHeight + (e.deltaY > 0 ? 2.5 : -2.5), 14, 58);
+        this.overviewHeight = THREE.MathUtils.clamp(this.overviewHeight + (e.deltaY > 0 ? 3.5 : -3.5), 16, 120);
       }
       return;
     }

@@ -27,6 +27,7 @@ export const DEFAULT_SETTINGS: GameSettings = {
     use: 'KeyE',
     buy: 'KeyB',
     drop: 'KeyG',
+    inspect: 'KeyF',
     scoreboard: 'Tab',
   },
 };

@@ -1,6 +1,6 @@
 import { ArrowLeft, Eye, Shuffle } from 'lucide-react';
 import { Team } from '../game/types';
-import { CharacterPreviewCanvas } from './CharacterPreviewCanvas';
+import { CharacterPreviewCanvas } from './characters/CharacterPreviewCanvas';
 
 interface TeamSelectionProps {
   onSelectTeam: (team: Team) => void;
